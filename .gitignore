@@ -1,0 +1,9 @@
+# Rust
+/target/
+orchestrator/target/
+**/*.rs.bk
+*.pdb
+
+# Orchestrator runtime data (per-project)
+.orchestrator/messages/
+.orchestrator/runtime/

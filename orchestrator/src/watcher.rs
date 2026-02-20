@@ -1,0 +1,357 @@
+use notify::{Event as NotifyEvent, EventKind, RecursiveMode, Watcher};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
+
+use crate::injector::{InjectorOps, RealInjector};
+use crate::logger::{Event, Logger};
+use crate::supervisor::Registry;
+
+const BACKPRESSURE_THRESHOLD: usize = 5;
+
+// ---------------------------------------------------------------------------
+// Message metadata parsed from filename
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct MessageMeta {
+    pub filename: String,
+    pub path: PathBuf,
+    pub sender: String,
+    pub recipient: String,
+    pub topic: String,
+}
+
+/// Parse the naming convention: `<timestamp>__from-<sender>__to-<recipient>__topic-<topic>.md`
+/// Falls back to extracting the recipient from the parent directory name.
+pub fn parse_message(path: &Path) -> Option<MessageMeta> {
+    let filename = path.file_name()?.to_str()?.to_string();
+
+    // Try structured naming convention first
+    let parts: Vec<&str> = filename.split("__").collect();
+    if parts.len() >= 3 {
+        let sender = parts
+            .iter()
+            .find(|p| p.starts_with("from-"))
+            .map(|p| p.trim_start_matches("from-").to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let recipient = parts
+            .iter()
+            .find(|p| p.starts_with("to-"))
+            .map(|p| p.trim_start_matches("to-").to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let topic = parts
+            .iter()
+            .find(|p| p.starts_with("topic-"))
+            .map(|p| {
+                p.trim_start_matches("topic-")
+                    .trim_end_matches(".md")
+                    .trim_end_matches(".txt")
+                    .trim_end_matches(".json")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "general".into());
+
+        return Some(MessageMeta {
+            filename,
+            path: path.to_path_buf(),
+            sender,
+            recipient,
+            topic,
+        });
+    }
+
+    // Fallback: derive recipient from parent dir name (to_coder → coder)
+    let parent = path.parent()?.file_name()?.to_str()?;
+    if parent.starts_with("to_") {
+        let recipient = parent.trim_start_matches("to_").to_string();
+        return Some(MessageMeta {
+            filename,
+            path: path.to_path_buf(),
+            sender: "unknown".into(),
+            recipient,
+            topic: "general".into(),
+        });
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Watcher
+// ---------------------------------------------------------------------------
+
+pub struct MessageWatcher {
+    registry: Registry,
+    logger: Arc<Logger>,
+    messages_dir: PathBuf,
+    processed_dir: PathBuf,
+    dead_letter_dir: PathBuf,
+    seen_hashes: Arc<Mutex<HashSet<String>>>,
+    queues: Arc<Mutex<HashMap<String, VecDeque<MessageMeta>>>>,
+    injector: Arc<dyn InjectorOps>,
+}
+
+impl MessageWatcher {
+    pub fn new(
+        registry: Registry,
+        logger: Arc<Logger>,
+        messages_dir: PathBuf,
+    ) -> Self {
+        Self::new_with_injector(registry, logger, messages_dir, Arc::new(RealInjector))
+    }
+
+    pub fn new_with_injector(
+        registry: Registry,
+        logger: Arc<Logger>,
+        messages_dir: PathBuf,
+        injector: Arc<dyn InjectorOps>,
+    ) -> Self {
+        let processed_dir = messages_dir.join("processed");
+        let dead_letter_dir = messages_dir.join("dead_letter");
+        MessageWatcher {
+            registry,
+            logger,
+            messages_dir,
+            processed_dir,
+            dead_letter_dir,
+            seen_hashes: Arc::new(Mutex::new(HashSet::new())),
+            queues: Arc::new(Mutex::new(HashMap::new())),
+            injector,
+        }
+    }
+
+    /// Start watching all `messages/to_*` directories.
+    /// This spawns a background tokio task and returns immediately.
+    pub async fn start(self: Arc<Self>) {
+        // Use a std::sync channel so the notify callback (which runs on a
+        // plain OS thread) can send without needing a tokio runtime handle.
+        let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+
+        let messages_dir = self.messages_dir.clone();
+        std::thread::spawn(move || {
+            let mut watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, _>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            for path in event.paths {
+                                if path.is_file() {
+                                    let _ = tx.send(path);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("failed to create filesystem watcher");
+
+            // Watch each to_* directory
+            for entry in std::fs::read_dir(&messages_dir).expect("can't read messages dir") {
+                if let Ok(entry) = entry {
+                    let name = entry.file_name();
+                    let name_str = name.to_str().unwrap_or("");
+                    if name_str.starts_with("to_") && entry.path().is_dir() {
+                        watcher
+                            .watch(&entry.path(), RecursiveMode::NonRecursive)
+                            .expect("failed to watch directory");
+                        println!("[watcher] watching {}", entry.path().display());
+                    }
+                }
+            }
+
+            // Block this thread to keep the watcher alive
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        });
+
+        // Spawn the routing loop — polls the std channel from async context
+        let watcher = self.clone();
+        tokio::spawn(async move {
+            watcher.routing_loop(rx).await;
+        });
+    }
+
+    async fn routing_loop(self: Arc<Self>, rx: std::sync::mpsc::Receiver<PathBuf>) {
+        loop {
+            // Poll the sync channel without blocking the tokio runtime
+            let path = match rx.try_recv() {
+                Ok(p) => p,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!("[watcher] channel disconnected, stopping");
+                    break;
+                }
+            };
+
+            // Skip .gitkeep and hidden files
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+            }
+
+            // Small delay to let atomic renames finish
+            sleep(Duration::from_millis(200)).await;
+
+            if !path.exists() {
+                continue;
+            }
+
+            println!("[watcher] detected file: {}", path.display());
+
+            let meta = match parse_message(&path) {
+                Some(m) => m,
+                None => {
+                    eprintln!("[watcher] could not parse message: {}", path.display());
+                    continue;
+                }
+            };
+
+            self.logger.log(Event::MessageReceived {
+                filename: meta.filename.clone(),
+                sender: meta.sender.clone(),
+                recipient: meta.recipient.clone(),
+                topic: meta.topic.clone(),
+            });
+
+            // Backpressure: queue if inbox is overloaded
+            let inbox_count = self.count_inbox(&meta.recipient).await;
+            if inbox_count > BACKPRESSURE_THRESHOLD {
+                println!(
+                    "[watcher] backpressure: queuing message for {} (inbox has {} files)",
+                    meta.recipient, inbox_count
+                );
+                let mut queues = self.queues.lock().await;
+                queues
+                    .entry(meta.recipient.clone())
+                    .or_default()
+                    .push_back(meta);
+                continue;
+            }
+
+            self.route_message(meta).await;
+
+            // Drain any queued messages for recipients that are below threshold
+            self.drain_queues().await;
+        }
+    }
+
+    pub async fn route_message(&self, meta: MessageMeta) {
+        // Ensure destination dirs exist (creates them if missing).
+        let _ = std::fs::create_dir_all(&self.processed_dir);
+        let _ = std::fs::create_dir_all(&self.dead_letter_dir);
+
+        // Deduplication by content hash — lives here so it applies whether
+        // called from routing_loop or directly in tests.
+        if let Ok(bytes) = std::fs::read(&meta.path) {
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            let mut seen = self.seen_hashes.lock().await;
+            if seen.contains(&hash) {
+                println!("[watcher] skipping duplicate: {}", meta.filename);
+                let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
+                return;
+            }
+            seen.insert(hash);
+        }
+
+        let session = match self.registry.session_for(&meta.recipient).await {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "[watcher] no session for recipient '{}', dead-lettering: {}",
+                    meta.recipient, meta.filename
+                );
+                self.logger.log(Event::MessageDeadLetter {
+                    filename: meta.filename.clone(),
+                    reason: format!("unknown recipient: {}", meta.recipient),
+                });
+                let _ = std::fs::rename(&meta.path, self.dead_letter_dir.join(&meta.filename));
+                return;
+            }
+        };
+
+        // Read file content
+        let content = match std::fs::read_to_string(&meta.path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[watcher] failed to read {}: {e}", meta.filename);
+                let _ = std::fs::rename(&meta.path, self.dead_letter_dir.join(&meta.filename));
+                return;
+            }
+        };
+
+        // Inject with framing header
+        let framed = format!(
+            "--- INCOMING MESSAGE ---\nFROM: {}\nTOPIC: {}\nFILE: {}\n---\n\n{}",
+            meta.sender, meta.topic, meta.filename, content
+        );
+
+        match self.injector.inject(&session, &framed).await {
+            Ok(()) => {
+                self.logger.log(Event::MessageInjected {
+                    filename: meta.filename.clone(),
+                    recipient: meta.recipient.clone(),
+                });
+                let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
+                println!(
+                    "[watcher] routed {} → {} ({})",
+                    meta.sender, meta.recipient, meta.topic
+                );
+            }
+            Err(e) => {
+                self.logger.log(Event::MessageFailed {
+                    filename: meta.filename.clone(),
+                    recipient: meta.recipient.clone(),
+                    error: e.to_string(),
+                });
+                eprintln!(
+                    "[watcher] injection failed for {}: {e} — dead-lettering",
+                    meta.filename
+                );
+                let _ = std::fs::rename(&meta.path, self.dead_letter_dir.join(&meta.filename));
+            }
+        }
+    }
+
+    pub async fn count_inbox(&self, recipient: &str) -> usize {
+        let inbox = self.messages_dir.join(format!("to_{recipient}"));
+        std::fs::read_dir(inbox)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| !n.starts_with('.'))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn drain_queues(&self) {
+        let mut queues = self.queues.lock().await;
+        let recipients: Vec<String> = queues.keys().cloned().collect();
+        for recipient in recipients {
+            let count = self.count_inbox(&recipient).await;
+            if count <= BACKPRESSURE_THRESHOLD {
+                if let Some(queue) = queues.get_mut(&recipient) {
+                    if let Some(meta) = queue.pop_front() {
+                        drop(queues);
+                        self.route_message(meta).await;
+                        queues = self.queues.lock().await;
+                    }
+                }
+            }
+        }
+    }
+}
