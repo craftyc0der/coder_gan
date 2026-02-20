@@ -1,6 +1,16 @@
-# README.md
+🤖 Coder GAN: Generative Adversarial Network for Software Development
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+A multi-agent orchestration framework inspired by GANs. Like a generative adversarial network, competing agents drive quality:
+
+• Generator (Coder): Writes implementation code
+• Discriminator (Tester): Validates and challenges the implementation
+• Moderator (Reviewer): Resolves disputes and ensures quality
+
+🔒 Architectural Integrity: Each agent has restricted file system access—coders can't peek at tests, testers can't see implementation details before review. This prevents "cheating" and forces genuine problem-solving, mimicking real exam conditions where students can't see the answer key.
+
+🦀 Built with Rust: Generic orchestrator works with any project. Agents communicate via filesystem message queues and run in isolated tmux sessions.
+
+Perfect for: Autonomous coding experiments, multi-agent AI research, adversarial code quality systems.
 
 ## Project Overview
 
