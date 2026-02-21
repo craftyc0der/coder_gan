@@ -495,7 +495,6 @@ impl InjectorOps for RealInjector {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     #[cfg(target_os = "linux")]
