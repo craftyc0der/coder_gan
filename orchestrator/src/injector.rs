@@ -75,6 +75,62 @@ pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionE
         });
     }
 
+    let mouse_status = Command::new("tmux")
+        .args(["set-option", "-t", session, "mouse", "on"])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "set-option mouse".into(),
+            detail: e.to_string(),
+        })?;
+    if !mouse_status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "set-option mouse".into(),
+            detail: format!("exited with {mouse_status}"),
+        });
+    }
+
+    let history_status = Command::new("tmux")
+        .args(["set-option", "-t", session, "history-limit", "100000"])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "set-option history-limit".into(),
+            detail: e.to_string(),
+        })?;
+    if !history_status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "set-option history-limit".into(),
+            detail: format!("exited with {history_status}"),
+        });
+    }
+
+    let title_status = Command::new("tmux")
+        .args(["set-option", "-t", session, "set-titles", "on"])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "set-option set-titles".into(),
+            detail: e.to_string(),
+        })?;
+    if !title_status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "set-option set-titles".into(),
+            detail: format!("exited with {title_status}"),
+        });
+    }
+
+    let title_string_status = Command::new("tmux")
+        .args(["set-option", "-t", session, "set-titles-string", "#S"])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "set-option set-titles-string".into(),
+            detail: e.to_string(),
+        })?;
+    if !title_string_status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "set-option set-titles-string".into(),
+            detail: format!("exited with {title_string_status}"),
+        });
+    }
+
     Ok(open_terminal_window(session))
 }
 
@@ -339,9 +395,9 @@ fn inject_once(session: &str, text: &str) -> Result<(), InjectionError> {
 
     let result = (|| {
         run_tmux(&["load-buffer", tmp_path.to_str().unwrap()])?;
-        run_tmux(&["paste-buffer", "-t", session])?;
+        run_tmux(&["paste-buffer", "-p", "-t", session])?;
         // Wait for the paste to land in the terminal before sending Enter
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         run_tmux(&["send-keys", "-t", session, "Enter"])?;
         Ok(())
     })();

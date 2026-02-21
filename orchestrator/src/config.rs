@@ -271,6 +271,32 @@ pub fn init_project(project_path: &Path) -> Result<(), ConfigError> {
 }
 
 // ---------------------------------------------------------------------------
+// Startup validation warnings
+// ---------------------------------------------------------------------------
+
+/// Check agent commands for known configuration issues and return warning messages.
+///
+/// These are non-blocking informational warnings only — they never prevent startup.
+/// Currently checks:
+/// - Gemini without `--yolo` or `--approval-mode`: will block on action confirmations.
+pub fn check_agent_command_warnings(agents: &[AgentEntry]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for agent in agents {
+        let cmd = agent.command.as_str();
+        if cmd == "gemini" || cmd.starts_with("gemini ") {
+            if !cmd.contains("--yolo") && !cmd.contains("--approval-mode") {
+                warnings.push(format!(
+                    "Warning: Agent '{}' uses gemini without --yolo. \
+                     It may block on action confirmations.",
+                    agent.id
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+// ---------------------------------------------------------------------------
 // Default config and prompts
 // ---------------------------------------------------------------------------
 
@@ -278,6 +304,17 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 # Each [[agents]] block defines one autonomous agent.
 # Tmux session names are auto-derived: <project-name>-<agent-id>
 # Inbox directories are auto-derived: .orchestrator/messages/to_<agent-id>/
+#
+# Supported CLI tools and recommended flags:
+#   claude:  claude --dangerously-skip-permissions
+#   codex:   codex --approval-mode full-auto
+#   copilot: copilot
+#   gemini:  gemini --yolo
+#            gemini --yolo --sandbox    (sandboxed; recommended for tester agents)
+#            gemini --yolo -m gemini-2.5-pro  (specific model)
+#
+# IMPORTANT: Gemini agents must use --yolo or --approval-mode yolo for
+# autonomous operation. Without it, Gemini will block on action confirmations.
 
 [[agents]]
 id = "coder"
@@ -344,6 +381,19 @@ Write a file to the recipient's inbox directory. Use this naming convention:
 Inbox directories:
 - {{messages_dir}}/to_tester/   (send test requests to the tester)
 - {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
+
+=== CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
+
+Whenever you finish requested work, you MUST send a completion message directly
+to the agent or operator who made the request. Do NOT simply complete the work
+without notifying the requester.
+
+Your completion message must be written to the requesting agent's inbox and must:
+1. Confirm what was done.
+2. Include any output, results, or next steps the requester needs to proceed.
+
+Announcing "done" in your session output without sending a message to the
+requesting agent's inbox is NOT sufficient and violates this requirement.
 
 === INCOMING MESSAGES ===
 
@@ -420,6 +470,19 @@ Inbox directories:
 - {{messages_dir}}/to_coder/    (send questions or results to the coder)
 - {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
 
+=== CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
+
+Whenever you finish requested work, you MUST send a completion message directly
+to the agent or operator who made the request. Do NOT simply complete the work
+without notifying the requester.
+
+Your completion message must be written to the requesting agent's inbox and must:
+1. Confirm what was done.
+2. Include any output, results, or next steps the requester needs to proceed.
+
+Announcing "done" in your session output without sending a message to the
+requesting agent's inbox is NOT sufficient and violates this requirement.
+
 === INCOMING MESSAGES ===
 
 Messages from other agents will be pasted into this session with a header:
@@ -481,6 +544,19 @@ Inbox directories:
 
 When resolving a dispute, send your decision to BOTH agents.
 
+=== CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
+
+Whenever you finish requested work, you MUST send a completion message directly
+to the agent or operator who made the request. Do NOT simply complete the work
+without notifying the requester.
+
+Your completion message must be written to the requesting agent's inbox and must:
+1. Confirm what was done.
+2. Include any output, results, or next steps the requester needs to proceed.
+
+Announcing "done" in your session output without sending a message to the
+requesting agent's inbox is NOT sufficient and violates this requirement.
+
 === INCOMING MESSAGES ===
 
 Messages from other agents will be pasted into this session with a header:
@@ -494,3 +570,98 @@ TOPIC: <topic>
 Wait for messages from the coder or tester before taking action. You act on
 request, not proactively.
 "#;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_agent(id: &str, command: &str) -> AgentEntry {
+        AgentEntry {
+            id: id.to_string(),
+            command: command.to_string(),
+            prompt_file: "prompts/coder.md".to_string(),
+            allowed_write_dirs: vec![],
+        }
+    }
+
+    #[test]
+    fn gemini_without_yolo_emits_warning() {
+        let agents = vec![make_agent("coder", "gemini")];
+        let warnings = check_agent_command_warnings(&agents);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("coder"));
+        assert!(warnings[0].contains("--yolo"));
+    }
+
+    #[test]
+    fn gemini_with_extra_flags_but_no_yolo_emits_warning() {
+        let agents = vec![make_agent("tester", "gemini --sandbox -m gemini-2.5-pro")];
+        let warnings = check_agent_command_warnings(&agents);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("tester"));
+    }
+
+    #[test]
+    fn gemini_with_yolo_no_warning() {
+        let agents = vec![make_agent("coder", "gemini --yolo")];
+        let warnings = check_agent_command_warnings(&agents);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn gemini_with_yolo_and_sandbox_no_warning() {
+        let agents = vec![make_agent("tester", "gemini --yolo --sandbox")];
+        let warnings = check_agent_command_warnings(&agents);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn gemini_with_approval_mode_no_warning() {
+        let agents = vec![make_agent("coder", "gemini --approval-mode yolo")];
+        let warnings = check_agent_command_warnings(&agents);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_command_no_warning() {
+        let agents = vec![
+            make_agent("coder", "claude"),
+            make_agent("tester", "codex --approval-mode full-auto"),
+            make_agent("reviewer", "my-custom-cli"),
+        ];
+        let warnings = check_agent_command_warnings(&agents);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn gemini_toml_parses_correctly() {
+        let toml_str = r#"
+[[agents]]
+id = "coder"
+command = "gemini --yolo"
+prompt_file = "prompts/coder.md"
+allowed_write_dirs = ["src/"]
+"#;
+        let parsed: AgentsToml = toml::from_str(toml_str).expect("should parse");
+        assert_eq!(parsed.agents.len(), 1);
+        assert_eq!(parsed.agents[0].command, "gemini --yolo");
+        let warnings = check_agent_command_warnings(&parsed.agents);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn multiple_agents_only_warns_for_gemini_without_yolo() {
+        let agents = vec![
+            make_agent("coder", "claude"),
+            make_agent("tester", "gemini"),
+            make_agent("reviewer", "gemini --yolo"),
+        ];
+        let warnings = check_agent_command_warnings(&agents);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("tester"));
+    }
+}
