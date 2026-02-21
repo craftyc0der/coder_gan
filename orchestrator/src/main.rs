@@ -145,6 +145,11 @@ fn cmd_init(project_path: &Path) {
 async fn run_orchestrator(config: ProjectConfig) {
     config.ensure_dirs().expect("failed to create directories");
 
+    // Print non-blocking warnings for known configuration issues
+    for warning in config::check_agent_command_warnings(&config.agents) {
+        eprintln!("{warning}");
+    }
+
     let logger = Arc::new(Logger::new(&config.log_dir, "events.jsonl"));
     logger.log(Event::OrchestratorStart);
 

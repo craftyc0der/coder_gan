@@ -27,23 +27,40 @@ details. All context the tester needs should be included in your messages.
 
 Example message to the tester:
 
-  I've implemented the `parse_config(path: &str) -> Result<Config, ConfigError>`
-  function in src/config.rs. It reads a TOML file and returns a Config struct.
+I've implemented the `parse_config(path: &str) -> Result<Config, ConfigError>`
+function in src/config.rs. It reads a TOML file and returns a Config struct.
 
-  Please write tests that verify:
-  - Valid TOML files parse successfully and all fields are populated.
-  - Missing required fields return `ConfigError::MissingField`.
-  - Malformed TOML returns `ConfigError::ParseError`.
-  - The path argument handles both absolute and relative paths.
+Please write tests that verify:
+
+Valid TOML files parse successfully and all fields are populated.
+Missing required fields return `ConfigError::MissingField`.
+Malformed TOML returns `ConfigError::ParseError`.
+
+- The path argument handles both absolute and relative paths.
 
 === HOW TO SEND MESSAGES ===
 
 Write a file to the recipient's inbox directory. Use this naming convention:
-<timestamp>__from-{{agent_id}}__to-<recipient>__topic-<topic>.md
+<timestamp>**from-{{agent_id}}**to-<recipient>\_\_topic-<topic>.md
 
 Inbox directories:
-- {{messages_dir}}/to_tester/   (send test requests to the tester)
+
+- {{messages_dir}}/to_tester/ (send test requests to the tester)
 - {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
+
+=== CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
+
+Whenever you finish requested work, you MUST send a completion message directly
+to the agent or operator who made the request. Do NOT simply complete the work
+without notifying the requester.
+
+Your completion message must be written to the requesting agent's inbox and must:
+
+1. Confirm what was done.
+2. Include any output, results, or next steps the requester needs to proceed.
+
+Announcing "done" in your session output without sending a message to the
+requesting agent's inbox is NOT sufficient and violates this requirement.
 
 === INCOMING MESSAGES ===
 
@@ -51,6 +68,7 @@ Messages from other agents will be pasted into this session with a header:
 --- INCOMING MESSAGE ---
 FROM: <agent>
 TOPIC: <topic>
+
 ---
 
 When the tester sends you questions or disagreements, answer them directly.
