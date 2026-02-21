@@ -150,16 +150,14 @@ impl MessageWatcher {
             .expect("failed to create filesystem watcher");
 
             // Watch each to_* directory
-            for entry in std::fs::read_dir(&messages_dir).expect("can't read messages dir") {
-                if let Ok(entry) = entry {
-                    let name = entry.file_name();
-                    let name_str = name.to_str().unwrap_or("");
-                    if name_str.starts_with("to_") && entry.path().is_dir() {
-                        watcher
-                            .watch(&entry.path(), RecursiveMode::NonRecursive)
-                            .expect("failed to watch directory");
-                        println!("[watcher] watching {}", entry.path().display());
-                    }
+            for entry in std::fs::read_dir(&messages_dir).expect("can't read messages dir").flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_str().unwrap_or("");
+                if name_str.starts_with("to_") && entry.path().is_dir() {
+                    watcher
+                        .watch(&entry.path(), RecursiveMode::NonRecursive)
+                        .expect("failed to watch directory");
+                    println!("[watcher] watching {}", entry.path().display());
                 }
             }
 

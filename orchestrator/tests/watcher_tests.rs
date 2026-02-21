@@ -31,7 +31,7 @@ impl InjectorOps for MockInjector {
     fn kill_session(&self, _session: &str) {}
 
     fn spawn_session(&self, _session: &str, _cmd: &str) -> Result<Option<u32>, InjectionError> {
-        Ok(None) // No Terminal.app window in tests
+        Ok(None) // No terminal window in tests
     }
 
     fn inject<'a>(

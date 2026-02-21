@@ -291,7 +291,7 @@ fn cmd_stop(config: &ProjectConfig) {
         if let Ok(content) = std::fs::read_to_string(&config.state_path) {
             if let Ok(state) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&content)
             {
-                for (_id, val) in &state {
+                for val in state.values() {
                     if let Some(session) = val["tmux_session"].as_str() {
                         if injector::has_session(session) {
                             println!("Killing tmux session: {session}");
@@ -300,9 +300,13 @@ fn cmd_stop(config: &ProjectConfig) {
                             println!("Session not found (already dead?): {session}");
                         }
                     }
-                    if let Some(window_id) = val["terminal_window_id"].as_u64().map(|id| id as u32) {
-                        println!("Closing Terminal.app window: {window_id}");
-                        injector::close_terminal_window(window_id);
+                    if let Some(handle) = val["terminal_handle"]
+                        .as_u64()
+                        .or_else(|| val["terminal_window_id"].as_u64())
+                        .map(|id| id as u32)
+                    {
+                        println!("Closing terminal window: {handle}");
+                        injector::close_terminal_handle(handle);
                     }
                 }
                 let logger = Logger::new(&config.log_dir, "events.jsonl");
