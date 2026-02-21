@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -21,8 +21,8 @@ struct MockInjector {
 
     spawn_error_for: Mutex<HashSet<String>>,
     capture_error: Mutex<bool>,
-    terminal_window_ids: Mutex<HashMap<String, Option<u32>>>,
-    terminal_window_id_queue: Mutex<HashMap<String, Vec<Option<u32>>>>,
+    terminal_handles: Mutex<HashMap<String, Option<u32>>>,
+    terminal_handle_queue: Mutex<HashMap<String, Vec<Option<u32>>>>,
 
     has_session_queue: Mutex<Vec<bool>>,
     default_has_session: Mutex<bool>,
@@ -50,15 +50,17 @@ impl MockInjector {
         *self.capture_error.lock().unwrap() = value;
     }
 
-    fn set_terminal_window_id(&self, session: &str, window_id: Option<u32>) {
-        self.terminal_window_ids
+    fn set_terminal_handle(&self, session: &str, window_id: Option<u32>) {
+        self.terminal_handles
             .lock()
             .unwrap()
             .insert(session.to_string(), window_id);
     }
 
-    fn set_terminal_window_id_queue(&self, session: &str, values: Vec<Option<u32>>) {
-        self.terminal_window_id_queue
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
+    fn set_terminal_handle_queue(&self, session: &str, values: Vec<Option<u32>>) {
+        self.terminal_handle_queue
             .lock()
             .unwrap()
             .insert(session.to_string(), values);
@@ -84,23 +86,18 @@ impl InjectorOps for MockInjector {
             .lock()
             .unwrap()
             .push((session.to_string(), cmd.to_string()));
-        if self
-            .spawn_error_for
-            .lock()
-            .unwrap()
-            .contains(session)
-        {
+        if self.spawn_error_for.lock().unwrap().contains(session) {
             Err(InjectionError::TmuxCommand {
                 step: "new-session".into(),
                 detail: "mock spawn error".into(),
             })
         } else {
-            if let Some(values) = self.terminal_window_id_queue.lock().unwrap().get_mut(session) {
+            if let Some(values) = self.terminal_handle_queue.lock().unwrap().get_mut(session) {
                 if !values.is_empty() {
                     return Ok(values.remove(0));
                 }
             }
-            let ids = self.terminal_window_ids.lock().unwrap();
+            let ids = self.terminal_handles.lock().unwrap();
             Ok(ids.get(session).cloned().unwrap_or(None))
         }
     }
@@ -160,7 +157,13 @@ fn make_registry(
     let state_path = log_dir.join("state.json");
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let configs = make_agents(tmp);
-    let registry = Registry::new_with_injector(configs, state_path.clone(), log_dir.clone(), logger.clone(), injector);
+    let registry = Registry::new_with_injector(
+        configs,
+        state_path.clone(),
+        log_dir.clone(),
+        logger.clone(),
+        injector,
+    );
     (registry, logger, log_dir, state_path)
 }
 
@@ -194,7 +197,9 @@ async fn spawn_all_spawns_each_agent_and_records_state() {
         }
     }
     assert!(!statuses.is_empty());
-    assert!(statuses.iter().all(|s| s.eq_ignore_ascii_case("healthy") || s == "Healthy"));
+    assert!(statuses
+        .iter()
+        .all(|s| s.eq_ignore_ascii_case("healthy") || s == "Healthy"));
 }
 
 #[tokio::test]
@@ -309,7 +314,11 @@ async fn health_loop_dead_agent_restarts_and_logs() {
     let events = read_events(&log_dir.join("events.jsonl"));
     let event_names: Vec<String> = events
         .iter()
-        .filter_map(|v| v.get("event").and_then(|e| e.as_str()).map(|s| s.to_string()))
+        .filter_map(|v| {
+            v.get("event")
+                .and_then(|e| e.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     assert!(event_names.contains(&"agent_exit".to_string()));
     assert!(event_names.contains(&"agent_restart".to_string()));
@@ -348,7 +357,10 @@ async fn health_loop_degrades_after_five_deaths() {
         tokio::time::advance(Duration::from_secs(5)).await;
         tokio::task::yield_now().await;
         let events = read_events(&log_dir.join("events.jsonl"));
-        if events.iter().any(|v| v.get("event").and_then(|e| e.as_str()) == Some("agent_degraded")) {
+        if events
+            .iter()
+            .any(|v| v.get("event").and_then(|e| e.as_str()) == Some("agent_degraded"))
+        {
             degraded = true;
             break;
         }
@@ -391,10 +403,11 @@ async fn kill_all_calls_kill_session_for_each_agent() {
 }
 
 #[tokio::test]
-async fn spawn_all_records_terminal_window_id_when_present() {
+#[cfg(not(target_os = "linux"))]
+async fn spawn_all_records_terminal_handle_when_present() {
     let tmp = TempDir::new().unwrap();
     let injector = Arc::new(MockInjector::default());
-    injector.set_terminal_window_id("testproject-coder", Some(42));
+    injector.set_terminal_handle("testproject-coder", Some(42));
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
     registry.spawn_all(&HashMap::new()).await;
@@ -405,19 +418,40 @@ async fn spawn_all_records_terminal_window_id_when_present() {
 
     let coder_state = map.get("coder").unwrap().as_object().unwrap();
     assert_eq!(
-        coder_state.get("terminal_window_id").and_then(|v| v.as_u64()),
+        coder_state.get("terminal_handle").and_then(|v| v.as_u64()),
         Some(42)
     );
 
     let tester_state = map.get("tester").unwrap().as_object().unwrap();
     assert!(
-        !tester_state.contains_key("terminal_window_id"),
-        "expected terminal_window_id to be omitted when None"
+        !tester_state.contains_key("terminal_handle"),
+        "expected terminal_handle to be omitted when None"
     );
 }
 
 #[tokio::test]
-async fn spawn_all_omits_terminal_window_id_when_none() {
+#[cfg(target_os = "linux")]
+async fn spawn_all_omits_terminal_handle_on_linux() {
+    let tmp = TempDir::new().unwrap();
+    let injector = Arc::new(MockInjector::default());
+    injector.set_terminal_handle("testproject-coder", Some(42));
+    let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
+
+    registry.spawn_all(&HashMap::new()).await;
+
+    let state_contents = std::fs::read_to_string(state_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
+    let map = json.as_object().unwrap();
+
+    let coder_state = map.get("coder").unwrap().as_object().unwrap();
+    assert!(
+        !coder_state.contains_key("terminal_handle"),
+        "expected terminal_handle to be omitted on Linux"
+    );
+}
+
+#[tokio::test]
+async fn spawn_all_omits_terminal_handle_when_none() {
     let tmp = TempDir::new().unwrap();
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
@@ -430,17 +464,17 @@ async fn spawn_all_omits_terminal_window_id_when_none() {
     for (_id, state) in map.iter() {
         let state_obj = state.as_object().unwrap();
         assert!(
-            !state_obj.contains_key("terminal_window_id"),
-            "expected terminal_window_id to be omitted when None"
+            !state_obj.contains_key("terminal_handle"),
+            "expected terminal_handle to be omitted when None"
         );
     }
 }
 
 #[tokio::test]
-async fn kill_all_with_terminal_window_id_does_not_panic() {
+async fn kill_all_with_terminal_handle_does_not_panic() {
     let tmp = TempDir::new().unwrap();
     let injector = Arc::new(MockInjector::default());
-    injector.set_terminal_window_id("testproject-coder", Some(7));
+    injector.set_terminal_handle("testproject-coder", Some(7));
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
     registry.spawn_all(&HashMap::new()).await;
@@ -451,22 +485,23 @@ async fn kill_all_with_terminal_window_id_does_not_panic() {
 }
 
 #[test]
-fn close_terminal_window_is_noop_and_does_not_panic() {
+fn close_terminal_handle_is_noop_and_does_not_panic() {
     let result = std::panic::catch_unwind(|| {
-        orchestrator::injector::close_terminal_window(0);
-        orchestrator::injector::close_terminal_window(42);
-        orchestrator::injector::close_terminal_window(u32::MAX);
+        orchestrator::injector::close_terminal_handle(0);
+        orchestrator::injector::close_terminal_handle(42);
+        orchestrator::injector::close_terminal_handle(u32::MAX);
     });
     assert!(result.is_ok());
 }
 
 #[tokio::test]
-async fn kill_all_after_respawn_uses_updated_terminal_window_id() {
+#[cfg(not(target_os = "linux"))]
+async fn kill_all_after_respawn_uses_updated_terminal_handle() {
     tokio::time::pause();
     let tmp = TempDir::new().unwrap();
     let injector = Arc::new(MockInjector::default());
     injector.set_default_has_session(false);
-    injector.set_terminal_window_id_queue(
+    injector.set_terminal_handle_queue(
         "testproject-coder",
         vec![
             Some(1),
@@ -495,7 +530,7 @@ async fn kill_all_after_respawn_uses_updated_terminal_window_id() {
         let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
         let map = json.as_object().unwrap();
         let coder_state = map.get("coder").unwrap().as_object().unwrap();
-        terminal_id = coder_state.get("terminal_window_id").and_then(|v| v.as_u64());
+        terminal_id = coder_state.get("terminal_handle").and_then(|v| v.as_u64());
         if terminal_id == Some(2) {
             break;
         }

@@ -53,7 +53,7 @@ impl InjectorOps for MockInjector {
                 step: "new-session".into(),
                 detail: msg.clone(),
             }),
-            None => Ok(None), // No Terminal.app window in tests
+            None => Ok(None), // No terminal window in tests
         }
     }
 

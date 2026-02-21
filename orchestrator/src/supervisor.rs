@@ -59,11 +59,17 @@ pub struct AgentState {
     pub last_start: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_heartbeat: Option<DateTime<Utc>>,
-    /// Terminal.app window ID opened for this agent session (macOS only).
-    /// Persisted to state.json so that `orchestrator stop` can close the
-    /// window even when the orchestrator process itself has exited.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_window_id: Option<u32>,
+    /// Terminal handle opened for this agent session.
+    /// On macOS, this is the Terminal.app window ID and is persisted to state.json.
+    /// On Linux, this is the terminal emulator PID and is NOT persisted (to avoid
+    /// killing unrelated processes if PIDs are reused after a reboot).
+    #[serde(alias = "terminal_window_id")]
+    #[cfg_attr(target_os = "linux", serde(skip_serializing))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        serde(skip_serializing_if = "Option::is_none")
+    )]
+    pub terminal_handle: Option<u32>,
     /// Timestamps of recent restarts (for windowed rate limiting).
     #[serde(skip)]
     pub restart_timestamps: Vec<DateTime<Utc>>,
@@ -137,16 +143,19 @@ impl Registry {
             sleep(Duration::from_millis(500)).await;
         }
 
-        match self.injector.spawn_session(&config.tmux_session, &config.cli_command) {
-            Ok(terminal_window_id) => {
+        match self
+            .injector
+            .spawn_session(&config.tmux_session, &config.cli_command)
+        {
+            Ok(terminal_handle) => {
                 let state = AgentState {
                     agent_id: config.agent_id.clone(),
                     tmux_session: config.tmux_session.clone(),
                     status: AgentStatus::Healthy,
                     restart_count: 0,
                     last_start: Utc::now(),
-                    last_heartbeat: Some(Utc::now()),
-                    terminal_window_id,
+                    last_heartbeat: None,
+                    terminal_handle,
                     restart_timestamps: Vec::new(),
                 };
                 self.agents
@@ -235,31 +244,28 @@ impl Registry {
                     if should_restart {
                         if let Some(config) = self.configs.get(id) {
                             // Capture old window ID and restart count before sleeping.
-                            let (attempt, old_window_id) = {
+                            let (attempt, old_handle) = {
                                 let agents = self.agents.lock().await;
-                                let (count, wid) = agents
+                                let (count, handle) = agents
                                     .get(id)
-                                    .map(|a| (a.restart_count, a.terminal_window_id))
+                                    .map(|a| (a.restart_count, a.terminal_handle))
                                     .unwrap_or((0, None));
-                                (count, wid)
+                                (count, handle)
                             };
                             // Exponential backoff: 1s, 2s, 4s, ...
                             let backoff = Duration::from_secs(1 << attempt.min(4));
-                            println!(
-                                "[supervisor] {} died — restarting in {:?}...",
-                                id, backoff
-                            );
+                            println!("[supervisor] {} died — restarting in {:?}...", id, backoff);
                             sleep(backoff).await;
 
-                            match self.injector.spawn_session(
-                                &config.tmux_session,
-                                &config.cli_command,
-                            ) {
-                                Ok(new_window_id) => {
-                                    // Close the old Terminal.app window now that a new
+                            match self
+                                .injector
+                                .spawn_session(&config.tmux_session, &config.cli_command)
+                            {
+                                Ok(new_handle) => {
+                                    // Close the old terminal window now that a new
                                     // one has been opened for the restarted session.
-                                    if let Some(window_id) = old_window_id {
-                                        crate::injector::close_terminal_window(window_id);
+                                    if let Some(handle) = old_handle {
+                                        crate::injector::close_terminal_handle(handle);
                                     }
                                     let mut agents = self.agents.lock().await;
                                     if let Some(a) = agents.get_mut(id) {
@@ -268,13 +274,17 @@ impl Registry {
                                         a.last_start = Utc::now();
                                         a.last_heartbeat = Some(Utc::now());
                                         a.status = AgentStatus::Healthy;
-                                        a.terminal_window_id = new_window_id;
+                                        a.terminal_handle = new_handle;
                                     }
                                     self.logger.log(Event::AgentRestart {
                                         agent_id: id.clone(),
                                         attempt: attempt + 1,
                                     });
-                                    println!("[supervisor] {} restarted (attempt {})", id, attempt + 1);
+                                    println!(
+                                        "[supervisor] {} restarted (attempt {})",
+                                        id,
+                                        attempt + 1
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!("[supervisor] failed to restart {}: {e}", id);
@@ -310,8 +320,7 @@ impl Registry {
 
                 match self.injector.capture(session) {
                     Ok(content) => {
-                        let transcript_path =
-                            self.log_dir.join(format!("{id}_transcript.log"));
+                        let transcript_path = self.log_dir.join(format!("{id}_transcript.log"));
                         let chars = content.len();
                         if let Ok(mut file) = std::fs::OpenOptions::new()
                             .create(true)
@@ -334,14 +343,14 @@ impl Registry {
         }
     }
 
-    /// Kill all agent tmux sessions and close their Terminal.app windows.
+    /// Kill all agent tmux sessions and close their terminal windows.
     pub async fn kill_all(&self) {
         let agents = self.agents.lock().await;
         for (id, state) in agents.iter() {
             println!("[supervisor] killing {}", id);
             self.injector.kill_session(&state.tmux_session);
-            if let Some(window_id) = state.terminal_window_id {
-                crate::injector::close_terminal_window(window_id);
+            if let Some(handle) = state.terminal_handle {
+                crate::injector::close_terminal_handle(handle);
             }
         }
     }

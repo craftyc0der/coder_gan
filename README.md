@@ -96,7 +96,7 @@ The orchestrator has 6 core modules in `orchestrator/src/`:
 1. **Config** (`config.rs`) — loads `agents.toml`, resolves all paths relative to `.orchestrator/`, renders prompt templates, scaffolds new projects via `init`
 2. **Process Supervisor** (`supervisor.rs`) — spawns agent tmux sessions, tracks restart counts, respawns crashed agents with exponential backoff (cap: 5 restarts in 2 minutes, then mark degraded)
 3. **Message Watcher** (`watcher.rs`) — uses `notify` crate to detect new files in `messages/to_*` directories, routes messages to agent sessions, SHA-256 dedup, backpressure handling
-4. **Injector** (`injector.rs`) — sends message content into tmux sessions via `tmux load-buffer` + `paste-buffer` + `send-keys Enter`; retry logic (3 attempts, 1s backoff)
+4. **Injector** (`injector.rs`) — sends message content into tmux sessions via `tmux load-buffer` + `paste-buffer` + `send-keys Enter`; retry logic (3 attempts, 1s backoff). Also handles cross-platform terminal window launching (Terminal.app on macOS, various emulators on Linux).
 5. **Event Logger** (`logger.rs`) — appends structured JSON lines to `events.jsonl` for all spawn/exit/restart and message routing events
 6. **Spike** (`spike.rs`) — de-risking tool to validate tmux injection against any configured agent
 
@@ -107,6 +107,20 @@ The orchestrator has 6 core modules in `orchestrator/src/`:
 - **Atomic writes**: writers must write to a temp file then rename into the inbox
 - **Delivery**: at-least-once; deduplicate by content hash
 - **Lifecycle**: new file → inject → move to `processed/` on success, or `dead_letter/` after retries exhausted
+
+## OS & Terminal Support
+
+The orchestrator supports cross-platform terminal window launching to visualize agent sessions:
+
+- **macOS**: Uses `Terminal.app` via AppleScript.
+- **Linux**: Automatically detects and launches the appropriate terminal emulator with no-fork flags. Supported emulators include:
+  - `ptyxis` (Fedora GNOME default)
+  - `gnome-terminal` (Ubuntu/GNOME)
+  - `konsole` (KDE)
+  - `xfce4-terminal` (XFCE)
+  - `alacritty`
+  - `kitty`
+  - `xterm`
 
 ## Build Commands
 
