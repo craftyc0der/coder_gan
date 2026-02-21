@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-use orchestrator::injector::{inject, spawn_session};
+use orchestrator::injector::{
+    close_terminal_handle, detect_terminal_emulator, inject, open_terminal_window, spawn_session,
+};
 use tempfile::TempDir;
 
 // Serialize PATH/TMUX_LOG manipulation across tests to prevent race conditions.
@@ -147,4 +149,61 @@ fn spawn_session_enables_mouse_and_history_scrollback() {
     assert_eq!(lines[2], "set-option -t demo-session history-limit 100000");
     assert_eq!(lines[3], "set-option -t demo-session set-titles on");
     assert_eq!(lines[4], "set-option -t demo-session set-titles-string #S");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn detect_terminal_emulator_with_terminal_env() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let orig_term = std::env::var("TERMINAL");
+
+    std::env::set_var("TERMINAL", "gnome-terminal");
+    let result = detect_terminal_emulator("test-session");
+    assert!(result.is_some());
+    let (cmd, args) = result.unwrap();
+    assert_eq!(cmd, "gnome-terminal");
+    assert_eq!(args[0], "--wait");
+
+    std::env::set_var("TERMINAL", "my-custom-term");
+    let result = detect_terminal_emulator("test-session");
+    assert!(result.is_some());
+    let (cmd, args) = result.unwrap();
+    assert_eq!(cmd, "my-custom-term");
+    assert_eq!(args[0], "-e");
+
+    match orig_term {
+        Ok(val) => std::env::set_var("TERMINAL", val),
+        Err(_) => std::env::remove_var("TERMINAL"),
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn open_terminal_window_headless() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    let orig_display = std::env::var_os("DISPLAY");
+    let orig_wayland = std::env::var_os("WAYLAND_DISPLAY");
+
+    std::env::remove_var("DISPLAY");
+    std::env::remove_var("WAYLAND_DISPLAY");
+
+    let result = open_terminal_window("test-session");
+    assert_eq!(result, None);
+
+    if let Some(val) = orig_display {
+        std::env::set_var("DISPLAY", val);
+    }
+    if let Some(val) = orig_wayland {
+        std::env::set_var("WAYLAND_DISPLAY", val);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn close_terminal_handle_linux_identity_verification() {
+    let my_pid = std::process::id();
+    close_terminal_handle(my_pid);
+    assert!(true);
 }

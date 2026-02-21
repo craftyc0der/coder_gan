@@ -31,8 +31,27 @@ fn warns_for_gemini_with_unrelated_flags() {
 }
 
 #[test]
+fn warns_for_gemini_with_sandbox_and_model_without_yolo() {
+    let agents = vec![agent("tester", "gemini --sandbox -m gemini-2.5-pro")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("tester"));
+}
+
+#[test]
 fn no_warning_for_gemini_with_yolo() {
     let agents = vec![agent("coder", "gemini --yolo")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn no_warning_for_gemini_with_yolo_and_sandbox() {
+    let agents = vec![agent("tester", "gemini --yolo --sandbox")];
 
     let warnings = check_agent_command_warnings(&agents);
 
@@ -114,6 +133,9 @@ allowed_write_dirs = ["tests/"]
     assert_eq!(parsed.agents.len(), 2);
     assert_eq!(parsed.agents[0].command, "gemini --yolo");
     assert_eq!(parsed.agents[1].command, "gemini --yolo --sandbox");
+
+    let warnings = check_agent_command_warnings(&parsed.agents);
+    assert!(warnings.is_empty());
 }
 
 #[test]
