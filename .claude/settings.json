@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "deny": [
+      "Read(orchestrator/tests/**)",
+      "Edit(orchestrator/tests/**)"
+    ],
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob"
+    ]
+  },
+  "fileFiltering": {
+    "customIgnorePatterns": [
+      "orchestrator/tests/**"
+    ]
+  }
+}

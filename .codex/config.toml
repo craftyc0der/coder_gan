@@ -1,0 +1,24 @@
+# Model & Trust Basics
+model = "gpt-5.2-codex"
+trust_level = "trusted"
+sandbox_mode = "workspace-write"
+
+[project]
+ignore_patterns = ["orchestrator/src/**"]
+
+# 1. Enable Web Search
+# "live" fetches real-time results; "cached" (default) uses a safe index.
+web_search = "live"
+
+[features]
+# 2. Experimental Optimization
+# "search_tool" lets the model intelligently pick which MCP tool to use
+# rather than injecting all documentation at once, saving context.
+search_tool = true
+skills = true
+
+# 3. Context7 MCP Configuration
+# Provides up-to-date documentation for ~20,000 libraries.
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp@latest"]

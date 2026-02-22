@@ -70,19 +70,18 @@ When you run `orchestrator init <project-path>`, this is created inside the targ
 id = "coder"
 command = "claude"
 prompt_file = "prompts/coder.md"        # relative to .orchestrator/
-allowed_write_dirs = ["src/"]            # relative to project root
+allowed_write_dirs = ["orchestrator/src/"]            # relative to project root
 
 [[agents]]
 id = "tester"
 command = "codex"
 prompt_file = "prompts/tester.md"
-allowed_write_dirs = ["tests/"]
+allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
-command = "claude"
+command = "copilot"
 prompt_file = "prompts/reviewer.md"
-allowed_write_dirs = ["review/"]
 ```
 
 - **Tmux session names** are auto-derived: `{project-dir-name}-{agent-id}` (e.g., `myproject-coder`)
