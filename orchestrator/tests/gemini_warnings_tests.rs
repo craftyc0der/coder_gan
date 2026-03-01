@@ -73,6 +73,7 @@ fn no_warning_for_non_gemini_commands() {
         agent("coder", "claude"),
         agent("tester", "codex --approval-mode full-auto"),
         agent("reviewer", "my-custom-gemini-wrapper"),
+        agent("helper", "cursor agent"),
     ];
 
     let warnings = check_agent_command_warnings(&agents);
@@ -142,5 +143,94 @@ allowed_write_dirs = ["tests/"]
 fn empty_agents_slice_is_ok() {
     let warnings = check_agent_command_warnings(&[]);
 
+    assert!(warnings.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Cursor warnings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn warns_for_cursor_without_agent_subcommand() {
+    let agents = vec![agent("coder", "cursor")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("coder"));
+    assert!(warnings[0].contains("cursor"));
+    assert!(warnings[0].contains("agent"));
+}
+
+#[test]
+fn warns_for_cursor_with_flags_but_no_agent_subcommand() {
+    let agents = vec![agent("coder", "cursor --some-flag")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("coder"));
+}
+
+#[test]
+fn no_warning_for_cursor_agent() {
+    let agents = vec![agent("coder", "cursor agent")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn no_warning_for_cursor_agent_with_flags() {
+    let agents = vec![agent("tester", "cursor agent --model gpt-4")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn no_warning_when_command_contains_cursor_but_not_at_start() {
+    let agents = vec![agent("coder", "my-cursor-wrapper")];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert!(warnings.is_empty());
+}
+
+#[test]
+fn mixed_agents_warns_for_both_gemini_and_cursor() {
+    let agents = vec![
+        agent("coder", "gemini --sandbox"),
+        agent("tester", "cursor"),
+        agent("reviewer", "cursor agent"),
+    ];
+
+    let warnings = check_agent_command_warnings(&agents);
+
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings[0].contains("coder"));
+    assert!(warnings[0].contains("gemini"));
+    assert!(warnings[1].contains("tester"));
+    assert!(warnings[1].contains("cursor"));
+}
+
+#[test]
+fn toml_parses_cursor_agent_command() {
+    let toml_str = r#"
+[[agents]]
+id = "coder"
+command = "cursor agent"
+prompt_file = "prompts/coder.md"
+allowed_write_dirs = ["src/"]
+"#;
+
+    let parsed: AgentsToml = toml::from_str(toml_str).expect("toml should parse");
+
+    assert_eq!(parsed.agents.len(), 1);
+    assert_eq!(parsed.agents[0].command, "cursor agent");
+
+    let warnings = check_agent_command_warnings(&parsed.agents);
     assert!(warnings.is_empty());
 }

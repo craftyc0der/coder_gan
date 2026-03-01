@@ -5,7 +5,7 @@
 
 [[agents]]
 id = "coder"
-command = "claude"
+command = "cursor agent"
 prompt_file = "prompts/coder.md"
 allowed_write_dirs = ["orchestrator/src/"]
 

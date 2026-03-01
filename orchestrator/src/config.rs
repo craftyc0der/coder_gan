@@ -279,6 +279,7 @@ pub fn init_project(project_path: &Path) -> Result<(), ConfigError> {
 /// These are non-blocking informational warnings only — they never prevent startup.
 /// Currently checks:
 /// - Gemini without `--yolo` or `--approval-mode`: will block on action confirmations.
+/// - Cursor without `agent` subcommand: will open the GUI instead of running as CLI.
 pub fn check_agent_command_warnings(agents: &[AgentEntry]) -> Vec<String> {
     let mut warnings = Vec::new();
     for agent in agents {
@@ -288,6 +289,15 @@ pub fn check_agent_command_warnings(agents: &[AgentEntry]) -> Vec<String> {
                 warnings.push(format!(
                     "Warning: Agent '{}' uses gemini without --yolo. \
                      It may block on action confirmations.",
+                    agent.id
+                ));
+            }
+        }
+        if cmd == "cursor" || cmd.starts_with("cursor ") {
+            if cmd != "cursor agent" && !cmd.starts_with("cursor agent ") {
+                warnings.push(format!(
+                    "Warning: Agent '{}' uses cursor without 'agent' subcommand. \
+                     Use 'cursor agent' for CLI mode; plain 'cursor' opens the GUI.",
                     agent.id
                 ));
             }
@@ -309,12 +319,14 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 #   claude:  claude --dangerously-skip-permissions
 #   codex:   codex --approval-mode full-auto
 #   copilot: copilot
+#   cursor:  cursor agent                (CLI mode; required — plain 'cursor' opens the GUI)
 #   gemini:  gemini --yolo
 #            gemini --yolo --sandbox    (sandboxed; recommended for tester agents)
 #            gemini --yolo -m gemini-2.5-pro  (specific model)
 #
 # IMPORTANT: Gemini agents must use --yolo or --approval-mode yolo for
 # autonomous operation. Without it, Gemini will block on action confirmations.
+# Cursor agents must use 'cursor agent' (not plain 'cursor') for CLI mode.
 
 [[agents]]
 id = "coder"

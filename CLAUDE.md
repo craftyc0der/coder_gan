@@ -70,9 +70,11 @@ allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
-command = "copilot"
+command = "cursor agent"
 prompt_file = "prompts/reviewer.md"
 ```
+
+Supported `command` values: `claude`, `codex`, `copilot`, `cursor agent`, `gemini`.
 
 - **Tmux session names** are auto-derived: `{project-dir-name}-{agent-id}` (e.g., `myproject-coder`)
 - **Inbox directories** are auto-derived: `.orchestrator/messages/to_{agent_id}/`

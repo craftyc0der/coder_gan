@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-use orchestrator::injector::{
-    close_terminal_handle, detect_terminal_emulator, inject, open_terminal_window, spawn_session,
-};
+#[cfg(target_os = "linux")]
+use orchestrator::injector::detect_terminal_emulator;
+use orchestrator::injector::{close_terminal_handle, inject, open_terminal_window, spawn_session};
 use tempfile::TempDir;
 
 // Serialize PATH/TMUX_LOG manipulation across tests to prevent race conditions.
@@ -36,12 +36,10 @@ async fn inject_uses_bracketed_paste_and_enter() {
     .unwrap();
     make_executable(&tmux_path);
 
-    let result = {
+    let (old_path, old_tmux_log) = {
         let _guard = ENV_LOCK.lock().unwrap();
-
         let old_path = std::env::var("PATH").ok();
         let old_tmux_log = std::env::var("TMUX_LOG").ok();
-
         std::env::set_var(
             "PATH",
             format!(
@@ -51,9 +49,13 @@ async fn inject_uses_bracketed_paste_and_enter() {
             ),
         );
         std::env::set_var("TMUX_LOG", &log_path);
+        (old_path, old_tmux_log)
+    };
 
-        let r = inject("demo-session", "hello world").await;
+    let result = inject("demo-session", "hello world").await;
 
+    {
+        let _guard = ENV_LOCK.lock().unwrap();
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
@@ -62,9 +64,7 @@ async fn inject_uses_bracketed_paste_and_enter() {
             Some(value) => std::env::set_var("TMUX_LOG", value),
             None => std::env::remove_var("TMUX_LOG"),
         }
-
-        r
-    };
+    }
 
     result.unwrap();
 
@@ -206,4 +206,85 @@ fn close_terminal_handle_linux_identity_verification() {
     let my_pid = std::process::id();
     close_terminal_handle(my_pid);
     assert!(true);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn open_terminal_window_macos_returns_none_on_osascript_failure() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let osascript_path = bin_dir.join("osascript");
+    fs::write(&osascript_path, "#!/usr/bin/env bash\nexit 1\n").unwrap();
+    make_executable(&osascript_path);
+
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_path = std::env::var("PATH").ok();
+
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                old_path.as_deref().unwrap_or("")
+            ),
+        );
+
+        let r = open_terminal_window("test-session");
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        r
+    };
+
+    assert_eq!(result, None);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn open_terminal_window_macos_parses_window_id() {
+    let tmp = TempDir::new().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let osascript_path = bin_dir.join("osascript");
+    fs::write(&osascript_path, "#!/usr/bin/env bash\necho 42\n").unwrap();
+    make_executable(&osascript_path);
+
+    let result = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_path = std::env::var("PATH").ok();
+
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                old_path.as_deref().unwrap_or("")
+            ),
+        );
+
+        let r = open_terminal_window("test-session");
+
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        r
+    };
+
+    assert_eq!(result, Some(42));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn close_terminal_handle_macos_noop_for_nonexistent_window() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    close_terminal_handle(999999);
 }
