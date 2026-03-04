@@ -3,7 +3,8 @@
     "cargo run": true,
     "cargo test": true,
     "sed": true,
-    "make": true
+    "make": true,
+    "cargo build": true
   },
   "[markdown]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode",

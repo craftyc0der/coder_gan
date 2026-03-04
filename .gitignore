@@ -7,3 +7,6 @@ orchestrator/target/
 # Orchestrator runtime data (per-project)
 .orchestrator/messages/
 .orchestrator/runtime/
+
+# Slack config (contains tokens/secrets)
+.orchestrator/slack_config.toml

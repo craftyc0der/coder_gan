@@ -17,6 +17,7 @@ pub enum ConfigError {
     MissingPromptFile(PathBuf),
     NoAgents,
     InvalidAgentId(String),
+    SlackConfigError(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -38,6 +39,7 @@ impl fmt::Display for ConfigError {
                 "Invalid agent id '{}': must be alphanumeric/hyphens only",
                 id
             ),
+            ConfigError::SlackConfigError(e) => write!(f, "Slack config error: {e}"),
         }
     }
 }
@@ -63,6 +65,153 @@ pub struct AgentEntry {
     pub command: String,
     pub prompt_file: String,
     pub allowed_write_dirs: Vec<String>,
+    #[serde(default)]
+    pub agent_type: AgentType,
+    #[serde(default)]
+    pub slack: Option<SlackAgentConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentType {
+    #[default]
+    Cli,
+    Slack,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlackAgentConfig {
+    pub config_file: String,
+}
+
+// ---------------------------------------------------------------------------
+// Slack configuration (parsed from external slack_config.toml)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SlackConfigToml {
+    #[serde(default)]
+    pub bot_token: Option<String>,
+    #[serde(default)]
+    pub bot_token_env: Option<String>,
+    #[serde(default)]
+    pub app_token: Option<String>,
+    #[serde(default)]
+    pub app_token_env: Option<String>,
+    #[serde(default)]
+    pub user_token: Option<String>,
+    #[serde(default)]
+    pub user_token_env: Option<String>,
+    pub bot_user_id: String,
+    #[serde(default)]
+    pub watch_channels: Vec<String>,
+    #[serde(default = "default_true")]
+    pub watch_mentions: bool,
+    #[serde(default = "default_true")]
+    pub watch_replied_threads: bool,
+    #[serde(default = "default_true")]
+    pub watch_dms: bool,
+    pub notification_channel: String,
+    pub alert_user_id: String,
+    #[serde(default = "default_min_message_length")]
+    pub min_message_length: usize,
+    #[serde(default)]
+    pub ignore_bot_ids: Vec<String>,
+    #[serde(default)]
+    pub alert_keywords: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_min_message_length() -> usize {
+    20
+}
+
+/// Resolved Slack configuration with tokens loaded from env/inline.
+#[derive(Debug, Clone)]
+pub struct SlackConfig {
+    pub bot_token: String,
+    pub app_token: String,
+    /// Optional user token (`xoxp-...`) for reading the installing user's DMs,
+    /// private channels, and threads as if the bot were that user.
+    pub user_token: Option<String>,
+    pub bot_user_id: String,
+    pub watch_channels: Vec<String>,
+    pub watch_mentions: bool,
+    pub watch_replied_threads: bool,
+    pub watch_dms: bool,
+    pub notification_channel: String,
+    pub alert_user_id: String,
+    pub min_message_length: usize,
+    pub ignore_bot_ids: Vec<String>,
+    pub alert_keywords: Vec<String>,
+}
+
+impl SlackConfig {
+    /// Load and resolve a SlackConfig from the external TOML file.
+    pub fn load(dot_dir: &Path, slack_agent_config: &SlackAgentConfig) -> Result<Self, ConfigError> {
+        let config_path = dot_dir.join(&slack_agent_config.config_file)
+            .canonicalize()
+            .unwrap_or_else(|_| dot_dir.join(&slack_agent_config.config_file));
+
+        // Try path relative to dot_dir first, then as-is
+        let toml_str = std::fs::read_to_string(&config_path)
+            .or_else(|_| std::fs::read_to_string(&slack_agent_config.config_file))
+            .map_err(|e| ConfigError::SlackConfigError(
+                format!("Failed to read {}: {e}", slack_agent_config.config_file)
+            ))?;
+
+        let raw: SlackConfigToml = toml::from_str(&toml_str)
+            .map_err(|e| ConfigError::SlackConfigError(
+                format!("Failed to parse slack config: {e}")
+            ))?;
+
+        let bot_token = resolve_token("bot_token", &raw.bot_token, &raw.bot_token_env)?;
+        let app_token = resolve_token("app_token", &raw.app_token, &raw.app_token_env)?;
+        let user_token = resolve_token("user_token", &raw.user_token, &raw.user_token_env).ok();
+
+        Ok(SlackConfig {
+            bot_token,
+            app_token,
+            user_token,
+            bot_user_id: raw.bot_user_id,
+            watch_channels: raw.watch_channels,
+            watch_mentions: raw.watch_mentions,
+            watch_replied_threads: raw.watch_replied_threads,
+            watch_dms: raw.watch_dms,
+            notification_channel: raw.notification_channel,
+            alert_user_id: raw.alert_user_id,
+            min_message_length: raw.min_message_length,
+            ignore_bot_ids: raw.ignore_bot_ids,
+            alert_keywords: raw.alert_keywords,
+        })
+    }
+}
+
+/// Resolve a token from env var or inline value.
+fn resolve_token(
+    name: &str,
+    inline: &Option<String>,
+    env_var_name: &Option<String>,
+) -> Result<String, ConfigError> {
+    // Env var takes priority
+    if let Some(env_name) = env_var_name {
+        if let Ok(val) = std::env::var(env_name) {
+            if !val.is_empty() {
+                return Ok(val);
+            }
+        }
+    }
+    // Fall back to inline
+    if let Some(val) = inline {
+        if !val.is_empty() {
+            return Ok(val.clone());
+        }
+    }
+    Err(ConfigError::SlackConfigError(format!(
+        "No {name} provided. Set {name}_env to an env var name, or set {name} inline."
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +264,25 @@ impl ProjectConfig {
         let log_dir = dot_dir.join("runtime/logs");
         let state_path = log_dir.join("state.json");
         let transcript_dir = log_dir.join("spike_transcripts");
+
+        // Validate slack agents
+        for agent in &agents_toml.agents {
+            if agent.agent_type == AgentType::Slack {
+                if agent.slack.is_none() {
+                    return Err(ConfigError::SlackConfigError(format!(
+                        "Agent '{}' has agent_type = \"slack\" but no [agents.slack] table",
+                        agent.id
+                    )));
+                }
+                if agent.command.is_empty() {
+                    return Err(ConfigError::SlackConfigError(format!(
+                        "Agent '{}' has agent_type = \"slack\" but command is empty. \
+                         Set command to the CLI for the triage AI (e.g., \"claude\").",
+                        agent.id
+                    )));
+                }
+            }
+        }
 
         Ok(ProjectConfig {
             project_root,

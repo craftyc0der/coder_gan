@@ -121,12 +121,16 @@ fn make_agents() -> Vec<AgentEntry> {
             command: "echo".into(),
             prompt_file: "prompts/coder.md".into(),
             allowed_write_dirs: vec!["src/".into()],
+            agent_type: Default::default(),
+            slack: None,
         },
         AgentEntry {
             id: "tester".into(),
             command: "echo".into(),
             prompt_file: "prompts/tester.md".into(),
             allowed_write_dirs: vec!["tests/".into()],
+            agent_type: Default::default(),
+            slack: None,
         },
     ]
 }

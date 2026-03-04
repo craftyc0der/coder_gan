@@ -107,6 +107,68 @@ pub enum Event {
         agent_id: String,
         path: String,
     },
+
+    // Slack agent events
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_connected")]
+    SlackConnected {
+        agent_id: String,
+        channels: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_disconnected")]
+    SlackDisconnected {
+        agent_id: String,
+        reason: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_message_received")]
+    SlackMessageReceived {
+        agent_id: String,
+        channel: String,
+        author: String,
+        ts: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_message_filtered")]
+    SlackMessageFiltered {
+        agent_id: String,
+        channel: String,
+        reason: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_message_routed")]
+    SlackMessageRouted {
+        agent_id: String,
+        source: String,
+        filename: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_response_skipped")]
+    SlackResponseSkipped {
+        agent_id: String,
+        channel: String,
+        reason: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_notification_posted")]
+    SlackNotificationPosted {
+        agent_id: String,
+        notification_channel: String,
+    },
+
+    #[cfg(feature = "slack")]
+    #[serde(rename = "slack_notification_failed")]
+    SlackNotificationFailed {
+        agent_id: String,
+        error: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
