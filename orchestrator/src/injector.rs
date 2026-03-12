@@ -354,6 +354,25 @@ pub fn kill_session(session: &str) {
         .status();
 }
 
+/// Kill the running process in the first pane of a tmux session and restart
+/// it with a new command. The session and any attached terminals stay alive.
+pub fn respawn_pane(session: &str, cmd: &str) -> Result<(), InjectionError> {
+    let status = Command::new("tmux")
+        .args(["respawn-pane", "-k", "-t", session, cmd])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "respawn-pane".into(),
+            detail: e.to_string(),
+        })?;
+    if !status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "respawn-pane".into(),
+            detail: format!("exited with {status}"),
+        });
+    }
+    Ok(())
+}
+
 /// Inject text into a tmux session (single attempt).
 /// Uses send-keys which handles Enter naturally — the text is sent as
 /// keyboard input followed by an Enter keystroke.
@@ -458,6 +477,9 @@ pub trait InjectorOps: Send + Sync {
     /// Spawn a tmux session. Returns the terminal handle if one was
     /// opened, or `None` (e.g. in tests or headless mode).
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError>;
+    /// Kill the running process inside the pane and restart it with a new
+    /// command, keeping the tmux session (and any attached terminal) alive.
+    fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError>;
     /// Async inject — returns a boxed future so the trait is object-safe.
     fn inject<'a>(
         &'a self,
@@ -479,6 +501,9 @@ impl InjectorOps for RealInjector {
     }
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
         spawn_session(session, cmd)
+    }
+    fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError> {
+        respawn_pane(session, cmd)
     }
     fn inject<'a>(
         &'a self,

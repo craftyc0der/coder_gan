@@ -57,6 +57,10 @@ impl InjectorOps for MockInjector {
         }
     }
 
+    fn respawn_pane(&self, _session: &str, _cmd: &str) -> Result<(), InjectionError> {
+        Ok(())
+    }
+
     fn inject<'a>(
         &'a self,
         session: &'a str,

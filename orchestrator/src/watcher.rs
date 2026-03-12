@@ -338,6 +338,36 @@ impl MessageWatcher {
             seen.insert(hash);
         }
 
+        // Handle _RESTART topic: restart the recipient agent with fresh context
+        if meta.topic.eq_ignore_ascii_case("_restart") {
+            println!(
+                "[watcher] restart requested for '{}' by '{}'",
+                meta.recipient, meta.sender
+            );
+            self.logger.log(Event::AgentRestartRequested {
+                agent_id: meta.recipient.clone(),
+                requested_by: meta.sender.clone(),
+            });
+            match self.registry.restart_agent(&meta.recipient).await {
+                Ok(()) => {
+                    let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
+                    println!(
+                        "[watcher] {} restarted (requested by {})",
+                        meta.recipient, meta.sender
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[watcher] failed to restart '{}': {e} — dead-lettering",
+                        meta.recipient
+                    );
+                    let _ =
+                        std::fs::rename(&meta.path, self.dead_letter_dir.join(&meta.filename));
+                }
+            }
+            return;
+        }
+
         let session = match self.registry.session_for(&meta.recipient).await {
             Some(s) => s,
             None => {

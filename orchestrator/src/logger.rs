@@ -59,6 +59,12 @@ pub enum Event {
         reason: String,
     },
 
+    #[serde(rename = "agent_restart_requested")]
+    AgentRestartRequested {
+        agent_id: String,
+        requested_by: String,
+    },
+
     #[serde(rename = "orchestrator_start")]
     OrchestratorStart,
 

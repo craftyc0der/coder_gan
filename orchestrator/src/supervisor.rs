@@ -83,6 +83,7 @@ pub struct AgentState {
 pub struct Registry {
     pub agents: Arc<Mutex<HashMap<String, AgentState>>>,
     configs: Arc<HashMap<String, AgentConfig>>,
+    startup_prompts: Arc<Mutex<HashMap<String, String>>>,
     state_path: PathBuf,
     log_dir: PathBuf,
     logger: Arc<Logger>,
@@ -113,6 +114,7 @@ impl Registry {
         Registry {
             agents: Arc::new(Mutex::new(HashMap::new())),
             configs: Arc::new(config_map),
+            startup_prompts: Arc::new(Mutex::new(HashMap::new())),
             state_path,
             log_dir,
             logger,
@@ -122,6 +124,12 @@ impl Registry {
 
     /// Spawn all configured agents, injecting a startup prompt into each.
     pub async fn spawn_all(&self, startup_prompts: &HashMap<String, String>) {
+        // Store prompts for later use by restart_agent
+        {
+            let mut prompts = self.startup_prompts.lock().await;
+            *prompts = startup_prompts.clone();
+        }
+
         for (id, config) in self.configs.iter() {
             self.spawn_agent(config).await;
 
@@ -368,5 +376,50 @@ impl Registry {
     pub async fn session_for(&self, agent_id: &str) -> Option<String> {
         let agents = self.agents.lock().await;
         agents.get(agent_id).map(|a| a.tmux_session.clone())
+    }
+
+    /// Restart an agent with a fresh context: respawn the pane process
+    /// within the existing tmux session and re-inject the startup prompt.
+    /// The terminal window stays open.
+    pub async fn restart_agent(&self, agent_id: &str) -> Result<(), String> {
+        let config = self
+            .configs
+            .get(agent_id)
+            .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
+
+        // Respawn the pane — kills the running process and starts the CLI
+        // command fresh, keeping the tmux session (and terminal) intact.
+        self.injector
+            .respawn_pane(&config.tmux_session, &config.cli_command)
+            .map_err(|e| format!("failed to respawn pane for {agent_id}: {e}"))?;
+
+        // Update state
+        {
+            let mut agents = self.agents.lock().await;
+            if let Some(state) = agents.get_mut(agent_id) {
+                state.status = AgentStatus::Healthy;
+                state.last_start = Utc::now();
+                state.last_heartbeat = Some(Utc::now());
+                // Don't increment restart_count or push to restart_timestamps;
+                // this is a deliberate restart, not a crash recovery.
+            }
+        }
+
+        self.logger.log(Event::AgentSpawn {
+            agent_id: agent_id.to_string(),
+        });
+
+        // Re-inject startup prompt
+        let prompts = self.startup_prompts.lock().await;
+        if let Some(prompt) = prompts.get(agent_id) {
+            sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
+            if let Err(e) = self.injector.inject(&config.tmux_session, prompt).await {
+                eprintln!("[supervisor] failed to inject startup prompt for {agent_id}: {e}");
+            }
+        }
+
+        self.persist_state().await;
+        println!("[supervisor] {agent_id} restarted with fresh context");
+        Ok(())
     }
 }

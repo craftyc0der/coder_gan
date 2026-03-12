@@ -724,6 +724,29 @@ Inbox directories:
 
 When resolving a dispute, send your decision to BOTH agents.
 
+=== RESTARTING AGENTS (FRESH CONTEXT) ===
+
+You can restart any agent with a clean slate by writing a message with the
+special topic `_RESTART`. The orchestrator will kill the agent's session,
+respawn it, and re-inject its original startup prompt — giving it a completely
+fresh context window.
+
+To restart an agent, write a file with topic-_RESTART to its inbox:
+<timestamp>__from-{{agent_id}}__to-<recipient>__topic-_RESTART.md
+
+The file content can be empty or contain a brief reason for the restart.
+
+Examples:
+- {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
+- {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
+
+WHEN TO RESTART: After a task has been completed successfully — once the coder
+has finished implementation and the tester has confirmed tests pass — restart
+both agents preemptively. This clears their context windows so they start the
+next task fresh, without accumulated context from the previous task polluting
+their reasoning. Do not wait to be asked; restart them as soon as a task is
+fully done.
+
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
 Whenever you finish requested work, you MUST send a completion message directly
