@@ -188,6 +188,26 @@ fn parse_message_returns_none_when_no_match() {
     assert!(parse_message(path).is_none());
 }
 
+#[test]
+fn parse_message_fuzzy_hyphen_separators() {
+    // Agent used hyphens instead of __ between fields
+    let path = Path::new("/tmp/to_tester_1/20260312-115239-from-reviewer-to-tester_1__topic-context-request.md");
+    let (_filename, sender, recipient, topic, _) = meta_fields(path);
+    assert_eq!(sender, "reviewer");
+    assert_eq!(recipient, "tester_1");
+    assert_eq!(topic, "context-request");
+}
+
+#[test]
+fn parse_message_fuzzy_all_hyphens() {
+    // All fields separated by hyphens, no __ at all
+    let path = Path::new("/tmp/to_tester/20260312-from-coder-to-tester-topic-review.md");
+    let (_filename, sender, recipient, topic, _) = meta_fields(path);
+    assert_eq!(sender, "coder");
+    assert_eq!(recipient, "tester");
+    assert_eq!(topic, "review");
+}
+
 #[tokio::test]
 async fn route_message_known_recipient_injects_and_moves_processed() {
     let tmp = TempDir::new().unwrap();

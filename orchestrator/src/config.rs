@@ -36,7 +36,7 @@ impl fmt::Display for ConfigError {
             ConfigError::NoAgents => write!(f, "agents.toml contains no [[agents]] entries"),
             ConfigError::InvalidAgentId(id) => write!(
                 f,
-                "Invalid agent id '{}': must be alphanumeric/hyphens only",
+                "Invalid agent id '{}': must be alphanumeric, hyphens, or underscores only",
                 id
             ),
             ConfigError::SlackConfigError(e) => write!(f, "Slack config error: {e}"),
@@ -253,7 +253,7 @@ impl ProjectConfig {
             if !agent
                 .id
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
             {
                 return Err(ConfigError::InvalidAgentId(agent.id.clone()));
             }

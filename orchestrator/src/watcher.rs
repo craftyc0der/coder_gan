@@ -26,11 +26,21 @@ pub struct MessageMeta {
 }
 
 /// Parse the naming convention: `<timestamp>__from-<sender>__to-<recipient>__topic-<topic>.md`
+///
+/// Also handles a common variant where agents use hyphens instead of `__` as
+/// field separators (e.g. `20260312-115239-from-reviewer-to-tester__topic-foo.md`).
+///
 /// Falls back to extracting the recipient from the parent directory name.
 pub fn parse_message(path: &Path) -> Option<MessageMeta> {
     let filename = path.file_name()?.to_str()?.to_string();
 
-    // Try structured naming convention first
+    // Strip file extension for field extraction
+    let stem = filename
+        .trim_end_matches(".md")
+        .trim_end_matches(".txt")
+        .trim_end_matches(".json");
+
+    // Try structured naming convention first (fields separated by __)
     let parts: Vec<&str> = filename.split("__").collect();
     if parts.len() >= 3 {
         let sender = parts
@@ -64,7 +74,23 @@ pub fn parse_message(path: &Path) -> Option<MessageMeta> {
         });
     }
 
-    // Fallback: derive recipient from parent dir name (to_coder → coder)
+    // Fuzzy fallback: scan the stem for "from-" and "to-" fields even when
+    // agents used hyphens instead of __ as separators.
+    let sender = extract_field_fuzzy(stem, "from-", &["to-", "topic-"]);
+    let recipient = extract_field_fuzzy(stem, "to-", &["from-", "topic-"]);
+    let topic = extract_field_fuzzy(stem, "topic-", &["from-", "to-"]);
+
+    if sender.is_some() || recipient.is_some() {
+        return Some(MessageMeta {
+            filename,
+            path: path.to_path_buf(),
+            sender: sender.unwrap_or_else(|| "unknown".into()),
+            recipient: recipient.unwrap_or_else(|| "unknown".into()),
+            topic: topic.unwrap_or_else(|| "general".into()),
+        });
+    }
+
+    // Last resort: derive recipient from parent dir name (to_coder → coder)
     let parent = path.parent()?.file_name()?.to_str()?;
     if parent.starts_with("to_") {
         let recipient = parent.trim_start_matches("to_").to_string();
@@ -78,6 +104,58 @@ pub fn parse_message(path: &Path) -> Option<MessageMeta> {
     }
 
     None
+}
+
+/// Extract a field value from a filename stem by looking for a known prefix
+/// and treating the value as everything up to the next known prefix (or end).
+///
+/// For example, in `20260312-from-reviewer-to-tester_1-topic-foo`:
+///   extract_field_fuzzy(stem, "from-", &["to-", "topic-"]) → Some("reviewer")
+///   extract_field_fuzzy(stem, "to-", &["from-", "topic-"]) → Some("tester_1")
+fn extract_field_fuzzy(stem: &str, prefix: &str, stop_prefixes: &[&str]) -> Option<String> {
+    // Find the last occurrence of the prefix preceded by a separator or at start.
+    // We search for "-from-", "-to-", "-topic-" (with leading separator) to avoid
+    // matching inside words. Also try "__from-" etc.
+    let search_with_sep = format!("-{}", prefix);
+    let search_with_dunder = format!("__{}", prefix);
+
+    let value_start = stem
+        .find(&search_with_sep)
+        .map(|i| i + search_with_sep.len())
+        .or_else(|| {
+            stem.find(&search_with_dunder)
+                .map(|i| i + search_with_dunder.len())
+        })
+        .or_else(|| {
+            // Also match at start of string
+            if stem.starts_with(prefix) {
+                Some(prefix.len())
+            } else {
+                None
+            }
+        })?;
+
+    let rest = &stem[value_start..];
+
+    // Find where the value ends: at the next known field prefix (with separator)
+    let mut end = rest.len();
+    for stop in stop_prefixes {
+        let stop_with_sep = format!("-{}", stop);
+        let stop_with_dunder = format!("__{}", stop);
+        if let Some(i) = rest.find(&stop_with_sep) {
+            end = end.min(i);
+        }
+        if let Some(i) = rest.find(&stop_with_dunder) {
+            end = end.min(i);
+        }
+    }
+
+    let value = rest[..end].trim_matches('-').trim_matches('_');
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
