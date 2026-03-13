@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use orchestrator::config::{self as config, ProjectConfig};
+#[cfg(feature = "slack")]
+use orchestrator::config::{AgentType, SlackConfig};
 use orchestrator::injector;
 use orchestrator::logger::{Event, Logger};
 use orchestrator::scope;
+#[cfg(feature = "slack")]
+use orchestrator::slack::SlackWatcher;
 use orchestrator::spike;
 use orchestrator::supervisor::Registry;
 use orchestrator::watcher::MessageWatcher;
@@ -193,6 +197,49 @@ async fn run_orchestrator(config: ProjectConfig) {
     println!("Spawning agents...");
     registry.spawn_all(&prompts).await;
     println!("All agents spawned.\n");
+
+    // Spawn Slack WebSocket watchers for slack-type agents
+    #[cfg(feature = "slack")]
+    {
+        let mut slack_handles = Vec::new();
+        for agent in &config.agents {
+            if agent.agent_type != AgentType::Slack {
+                continue;
+            }
+            let slack_agent_cfg = match &agent.slack {
+                Some(s) => s,
+                None => continue,
+            };
+            let slack_config = match SlackConfig::load(&config.dot_dir, slack_agent_cfg) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[slack] Failed to load config for {}: {e}", agent.id);
+                    continue;
+                }
+            };
+            let watcher = SlackWatcher::new(
+                slack_config,
+                agent.id.clone(),
+                config.messages_dir.clone(),
+                logger.clone(),
+            );
+            let watcher = Arc::new(watcher);
+
+            // Spawn WebSocket event loop
+            let ws_watcher = Arc::clone(&watcher);
+            slack_handles.push(tokio::spawn(async move {
+                ws_watcher.run().await;
+            }));
+
+            // Spawn response inbox watcher
+            let inbox_watcher = Arc::clone(&watcher);
+            slack_handles.push(tokio::spawn(async move {
+                inbox_watcher.watch_response_inbox().await;
+            }));
+
+            println!("[slack] Started watcher for agent '{}'", agent.id);
+        }
+    }
 
     // Start the filesystem message watcher
     let msg_watcher = Arc::new(MessageWatcher::new(

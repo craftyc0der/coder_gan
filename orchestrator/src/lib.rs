@@ -2,6 +2,8 @@ pub mod config;
 pub mod injector;
 pub mod logger;
 pub mod scope;
+#[cfg(feature = "slack")]
+pub mod slack;
 pub mod spike;
 pub mod supervisor;
 pub mod watcher;

@@ -34,6 +34,10 @@ impl InjectorOps for MockInjector {
         Ok(None) // No terminal window in tests
     }
 
+    fn respawn_pane(&self, _session: &str, _cmd: &str) -> Result<(), InjectionError> {
+        Ok(())
+    }
+
     fn inject<'a>(
         &'a self,
         session: &'a str,
@@ -188,6 +192,26 @@ fn parse_message_returns_none_when_no_match() {
     assert!(parse_message(path).is_none());
 }
 
+#[test]
+fn parse_message_fuzzy_hyphen_separators() {
+    // Agent used hyphens instead of __ between fields
+    let path = Path::new("/tmp/to_tester_1/20260312-115239-from-reviewer-to-tester_1__topic-context-request.md");
+    let (_filename, sender, recipient, topic, _) = meta_fields(path);
+    assert_eq!(sender, "reviewer");
+    assert_eq!(recipient, "tester_1");
+    assert_eq!(topic, "context-request");
+}
+
+#[test]
+fn parse_message_fuzzy_all_hyphens() {
+    // All fields separated by hyphens, no __ at all
+    let path = Path::new("/tmp/to_tester/20260312-from-coder-to-tester-topic-review.md");
+    let (_filename, sender, recipient, topic, _) = meta_fields(path);
+    assert_eq!(sender, "coder");
+    assert_eq!(recipient, "tester");
+    assert_eq!(topic, "review");
+}
+
 #[tokio::test]
 async fn route_message_known_recipient_injects_and_moves_processed() {
     let tmp = TempDir::new().unwrap();
@@ -314,6 +338,48 @@ async fn route_message_deduplicates_by_content() {
 
     let processed2 = find_named_file(&messages_dir, filename2).expect("expected processed file");
     assert!(processed2.to_string_lossy().contains("processed"));
+}
+
+#[tokio::test]
+async fn route_message_restart_topic_respawns_agent() {
+    let tmp = TempDir::new().unwrap();
+    let registry_injector = Arc::new(MockInjector::default());
+    let watcher_injector = Arc::new(MockInjector::default());
+    let (watcher, messages_dir) =
+        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+
+    let filename = "2026-03-12T00-00-00Z__from-reviewer__to-coder__topic-_RESTART.md";
+    let path = write_inbox(&messages_dir, filename, "task complete, resetting context");
+    let meta = parse_message(&path).unwrap();
+    assert_eq!(meta.topic, "_RESTART");
+
+    watcher.route_message(meta).await;
+
+    // Message should be moved to processed, not injected into the session
+    let processed = find_named_file(&messages_dir, filename).expect("expected processed file");
+    assert!(
+        processed.to_string_lossy().contains("processed"),
+        "expected processed dir, got {}",
+        processed.display()
+    );
+
+    // The message content should NOT have been injected (restart, not delivery)
+    let injected = watcher_injector.injected.lock().unwrap();
+    assert_eq!(injected.len(), 0, "restart should not inject the message");
+
+    // Check for the agent_restart_requested log event
+    let log_path = tmp
+        .path()
+        .join(".orchestrator/runtime/logs/events.jsonl");
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(
+        events.iter().any(|v| v["event"] == "agent_restart_requested"),
+        "expected agent_restart_requested event"
+    );
 }
 
 #[tokio::test]

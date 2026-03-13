@@ -6,6 +6,8 @@ fn agent(id: &str, command: &str) -> AgentEntry {
         command: command.to_string(),
         prompt_file: "prompts/coder.md".to_string(),
         allowed_write_dirs: vec!["src/".to_string()],
+        agent_type: Default::default(),
+        slack: None,
     }
 }
 

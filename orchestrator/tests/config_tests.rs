@@ -58,12 +58,16 @@ fn make_agents() -> Vec<AgentEntry> {
             command: "claude".into(),
             prompt_file: "prompts/coder.md".into(),
             allowed_write_dirs: vec!["src/".into()],
+            agent_type: Default::default(),
+            slack: None,
         },
         AgentEntry {
             id: "tester".into(),
             command: "codex".into(),
             prompt_file: "prompts/tester.md".into(),
             allowed_write_dirs: vec!["tests/".into()],
+            agent_type: Default::default(),
+            slack: None,
         },
     ]
 }
@@ -135,18 +139,14 @@ fn load_returns_no_agents_when_empty_array() {
 }
 
 #[test]
-fn load_rejects_agent_id_with_underscore() {
+fn load_accepts_agent_id_with_underscore() {
     let tmp = TempDir::new().unwrap();
     let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "hello");
     write_agents_toml(&dot_dir, &minimal_agents_toml("my_agent"));
 
-    match ProjectConfig::load(tmp.path()) {
-        Err(err) => match err {
-        ConfigError::InvalidAgentId(id) => assert_eq!(id, "my_agent"),
-        other => panic!("expected InvalidAgentId, got {other:?}"),
-        },
-        Ok(_) => panic!("expected InvalidAgentId, got Ok"),
-    }
+    let config = ProjectConfig::load(tmp.path()).unwrap();
+    assert_eq!(config.agents[0].id, "my_agent");
 }
 
 #[test]
