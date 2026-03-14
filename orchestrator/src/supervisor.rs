@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
-use crate::injector::{InjectorOps, RealInjector};
+use crate::config::ResolvedTimer;
+use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,7 @@ const MAX_RESTARTS_IN_WINDOW: u32 = 5;
 const RESTART_WINDOW_SECS: i64 = 120; // 2 minutes
 const AGENT_INIT_DELAY_SECS: u64 = 5;
 const TRANSCRIPT_INTERVAL_SECS: u64 = 30;
+const ACTIVITY_POLL_INTERVAL_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -50,6 +52,27 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
+/// Agent activity state derived from tmux pane content changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AgentActivity {
+    /// Pane content is changing between captures — agent is generating output.
+    Busy,
+    /// Pane content is stable — agent is waiting at a prompt.
+    Idle,
+    /// Not enough data to determine (e.g. just spawned).
+    Unknown,
+}
+
+impl std::fmt::Display for AgentActivity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentActivity::Busy => write!(f, "BUSY"),
+            AgentActivity::Idle => write!(f, "IDLE"),
+            AgentActivity::Unknown => write!(f, "UNKNOWN"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentState {
     pub agent_id: String,
@@ -73,6 +96,16 @@ pub struct AgentState {
     /// Timestamps of recent restarts (for windowed rate limiting).
     #[serde(skip)]
     pub restart_timestamps: Vec<DateTime<Utc>>,
+    /// Current activity state (busy/idle) derived from pane content changes.
+    #[serde(default = "default_activity")]
+    pub activity: AgentActivity,
+    /// Hash of last captured pane content for activity detection.
+    #[serde(skip)]
+    pub last_pane_hash: Option<u64>,
+}
+
+fn default_activity() -> AgentActivity {
+    AgentActivity::Unknown
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +198,8 @@ impl Registry {
                     last_heartbeat: None,
                     terminal_handle,
                     restart_timestamps: Vec::new(),
+                    activity: AgentActivity::Unknown,
+                    last_pane_hash: None,
                 };
                 self.agents
                     .lock()
@@ -323,7 +358,7 @@ impl Registry {
 
             for (id, session, status) in &states {
                 if *status == AgentStatus::Dead {
-                    continue; // session is gone
+                    continue;
                 }
 
                 match self.injector.capture(session) {
@@ -345,6 +380,48 @@ impl Registry {
                     }
                     Err(e) => {
                         eprintln!("[supervisor] transcript capture failed for {id}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Lightweight activity detection loop. Captures each agent's pane every
+    /// few seconds and compares content hashes to determine busy/idle state.
+    /// Call this as a background tokio task.
+    pub async fn activity_loop(self) {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        loop {
+            sleep(Duration::from_secs(ACTIVITY_POLL_INTERVAL_SECS)).await;
+
+            let states: Vec<(String, String, AgentStatus)> = {
+                let agents = self.agents.lock().await;
+                agents
+                    .values()
+                    .map(|a| (a.agent_id.clone(), a.tmux_session.clone(), a.status.clone()))
+                    .collect()
+            };
+
+            for (id, session, status) in &states {
+                if *status == AgentStatus::Dead {
+                    continue;
+                }
+
+                if let Ok(content) = self.injector.capture(&session) {
+                    let mut hasher = DefaultHasher::new();
+                    content.hash(&mut hasher);
+                    let current_hash = hasher.finish();
+
+                    let mut agents = self.agents.lock().await;
+                    if let Some(state) = agents.get_mut(id) {
+                        state.activity = match state.last_pane_hash {
+                            Some(prev) if prev == current_hash => AgentActivity::Idle,
+                            Some(_) => AgentActivity::Busy,
+                            None => AgentActivity::Unknown,
+                        };
+                        state.last_pane_hash = Some(current_hash);
                     }
                 }
             }
@@ -421,5 +498,99 @@ impl Registry {
         self.persist_state().await;
         println!("[supervisor] {agent_id} restarted with fresh context");
         Ok(())
+    }
+
+    /// Run the timer loop: periodically injects timer prompts into agent tmux
+    /// sessions.  Each timer fires at its configured `minutes` interval.
+    /// If `include_agents` is non-empty, a status footer showing those agents'
+    /// last transcript sizes is appended to the prompt.
+    pub async fn timer_loop(self, timers: Vec<ResolvedTimer>, logger: Arc<Logger>) {
+        use std::time::Instant;
+        use tokio::time::interval;
+
+        if timers.is_empty() {
+            return; // nothing to do
+        }
+
+        // Track last-fire time per (agent_id, index) so we can stagger.
+        let mut last_fired: Vec<Instant> = vec![Instant::now(); timers.len()];
+
+        // Tick every 30 seconds to check if any timer is due.
+        let mut tick = interval(Duration::from_secs(30));
+
+        loop {
+            tick.tick().await;
+
+            let now = Instant::now();
+
+            for (i, timer) in timers.iter().enumerate() {
+                let interval_dur = Duration::from_secs(timer.minutes * 60);
+                if now.duration_since(last_fired[i]) < interval_dur {
+                    continue;
+                }
+
+                last_fired[i] = now;
+
+                // Build the prompt with optional status footer
+                let mut prompt = timer.prompt.clone();
+                if !timer.include_agents.is_empty() {
+                    prompt.push_str("\n\n--- AGENT STATUS ---\n");
+                    let agents = self.agents.lock().await;
+                    for ref_id in &timer.include_agents {
+                        let status_line = if let Some(state) = agents.get(ref_id) {
+                            format!("- {}: {} | {} (started {})
+", ref_id, state.activity, state.status, state.last_start.format("%H:%M:%S UTC"))
+                        } else {
+                            format!("- {}: unknown\n", ref_id)
+                        };
+                        prompt.push_str(&status_line);
+                    }
+                    prompt.push_str("--- END STATUS ---\n");
+                }
+
+                // Frame it as a timer message
+                let framed = format!(
+                    "--- TIMER MESSAGE ---\nTO: {}\nTOPIC: _TIMER\n\n---\n\n{}\n",
+                    timer.agent_id, prompt
+                );
+
+                // Look up the session and command
+                let session = match self.session_for(&timer.agent_id).await {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("[timer] no session for '{}', skipping", timer.agent_id);
+                        continue;
+                    }
+                };
+
+                logger.log(Event::TimerFired {
+                    agent_id: timer.agent_id.clone(),
+                    minutes: timer.minutes,
+                    prompt_file: String::new(),
+                });
+
+                // Inject (with interrupt if configured)
+                let result = if timer.interrupt {
+                    let cmd = self.configs.get(&timer.agent_id)
+                        .map(|c| c.cli_command.as_str())
+                        .unwrap_or("");
+                    let keys = InterruptKeys::for_command(cmd);
+                    self.injector.inject_interrupt(&session, &framed, &keys).await
+                } else {
+                    self.injector.inject(&session, &framed).await
+                };
+
+                match result {
+                    Ok(()) => println!(
+                        "[timer] fired {}m timer for '{}'",
+                        timer.minutes, timer.agent_id
+                    ),
+                    Err(e) => eprintln!(
+                        "[timer] failed to inject {}m timer for '{}': {e}",
+                        timer.minutes, timer.agent_id
+                    ),
+                }
+            }
+        }
     }
 }

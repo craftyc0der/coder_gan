@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
-use orchestrator::injector::{InjectionError, InjectorOps};
+use orchestrator::injector::{InjectionError, InjectorOps, InterruptKeys};
 use orchestrator::logger::Logger;
 use orchestrator::supervisor::{AgentConfig, Registry};
 use orchestrator::watcher::{parse_message, MessageWatcher};
@@ -61,6 +61,19 @@ impl InjectorOps for MockInjector {
 
     fn capture(&self, _session: &str) -> Result<String, InjectionError> {
         Ok("".into())
+    }
+
+    fn send_keys(&self, _session: &str, _keys: &str) -> Result<(), InjectionError> {
+        Ok(())
+    }
+
+    fn inject_interrupt<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        _keys: &'a InterruptKeys,
+    ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
+        self.inject(session, text)
     }
 }
 
@@ -338,6 +351,37 @@ async fn route_message_deduplicates_by_content() {
 
     let processed2 = find_named_file(&messages_dir, filename2).expect("expected processed file");
     assert!(processed2.to_string_lossy().contains("processed"));
+}
+
+#[tokio::test]
+async fn route_message_restart_bypasses_dedup() {
+    let tmp = TempDir::new().unwrap();
+    let registry_injector = Arc::new(MockInjector::default());
+    let watcher_injector = Arc::new(MockInjector::default());
+    let (watcher, messages_dir) =
+        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+
+    // Send two _RESTART messages with identical content — both should be processed
+    let filename1 = "2026-03-14T00-00-01Z__from-reviewer__to-coder__topic-_RESTART.md";
+    let filename2 = "2026-03-14T00-00-02Z__from-reviewer__to-coder__topic-_RESTART.md";
+
+    let path1 = write_inbox(&messages_dir, filename1, "resetting context");
+    let meta1 = parse_message(&path1).unwrap();
+    watcher.route_message(meta1).await;
+
+    let path2 = write_inbox(&messages_dir, filename2, "resetting context");
+    let meta2 = parse_message(&path2).unwrap();
+    watcher.route_message(meta2).await;
+
+    // Both should be in processed (not skipped as duplicate)
+    let processed1 = find_named_file(&messages_dir, filename1).expect("first restart processed");
+    assert!(processed1.to_string_lossy().contains("processed"));
+    let processed2 = find_named_file(&messages_dir, filename2).expect("second restart processed");
+    assert!(processed2.to_string_lossy().contains("processed"));
+
+    // Neither should have been injected (restart doesn't inject)
+    let injected = watcher_injector.injected.lock().unwrap();
+    assert_eq!(injected.len(), 0);
 }
 
 #[tokio::test]

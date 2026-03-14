@@ -373,6 +373,101 @@ pub fn respawn_pane(session: &str, cmd: &str) -> Result<(), InjectionError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Per-bot interrupt key sequences
+// ---------------------------------------------------------------------------
+
+/// Bot-specific keys for interrupting an active generation and clearing
+/// any partial input left on the command line.
+pub struct InterruptKeys {
+    /// tmux `send-keys` value to cancel the current generation.
+    pub cancel: &'static str,
+    /// tmux `send-keys` value to clear partial input after cancel.
+    pub clear: &'static str,
+    /// Milliseconds to wait after sending cancel before clearing / injecting.
+    pub settle_ms: u64,
+}
+
+impl InterruptKeys {
+    /// Derive the correct interrupt keys from an agent's `command` field.
+    pub fn for_command(command: &str) -> Self {
+        match command.split_whitespace().next().unwrap_or("") {
+            "copilot" => InterruptKeys { cancel: "Escape", clear: "Escape", settle_ms: 2000 },
+            "gemini"  => InterruptKeys { cancel: "C-c", clear: "C-c", settle_ms: 2000 },
+            "cursor"  => InterruptKeys { cancel: "C-c", clear: "C-c", settle_ms: 2000 },
+            _         => InterruptKeys { cancel: "C-c", clear: "C-u", settle_ms: 2000 },
+        }
+    }
+}
+
+/// Send a single tmux `send-keys` command to the given session.
+pub fn send_keys(session: &str, keys: &str) -> Result<(), InjectionError> {
+    let output = Command::new("tmux")
+        .args(["send-keys", "-t", session, keys])
+        .output()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "send-keys".into(),
+            detail: e.to_string(),
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(InjectionError::TmuxCommand {
+            step: "send-keys".into(),
+            detail: format!(
+                "exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        })
+    }
+}
+
+/// Interrupt the agent's current generation, wait for it to settle,
+/// then inject the given text.  Single attempt, no retries.
+pub fn inject_interrupt_once(session: &str, text: &str, keys: &InterruptKeys) -> Result<(), InjectionError> {
+    // 1. Cancel current generation
+    send_keys(session, keys.cancel)?;
+
+    // 2. Wait for agent to process the interrupt
+    std::thread::sleep(std::time::Duration::from_millis(keys.settle_ms));
+
+    // 3. Clear any partial input left on the line
+    send_keys(session, keys.clear)?;
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // 4. Inject the payload
+    inject_once(session, text)
+}
+
+/// Interrupt + inject with up to [`MAX_RETRIES`] attempts.
+pub async fn inject_interrupt(
+    session: &str,
+    text: &str,
+    keys: &InterruptKeys,
+) -> Result<(), InjectionError> {
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_RETRIES {
+        match inject_interrupt_once(session, text, keys) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < MAX_RETRIES {
+                    sleep(Duration::from_secs(RETRY_BACKOFF_SECS * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(InjectionError::RetriesExhausted {
+        attempts: MAX_RETRIES,
+        last_error: last_err,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// tmux injection primitives
+// ---------------------------------------------------------------------------
+
 /// Inject text into a tmux session (single attempt).
 /// Uses send-keys which handles Enter naturally — the text is sent as
 /// keyboard input followed by an Enter keystroke.
@@ -487,6 +582,15 @@ pub trait InjectorOps: Send + Sync {
         text: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>>;
     fn capture(&self, session: &str) -> Result<String, InjectionError>;
+    /// Send a bare `send-keys` to the tmux session (e.g. for interrupt keys).
+    fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError>;
+    /// Interrupt the agent, wait for settle, then inject text.
+    fn inject_interrupt<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        keys: &'a InterruptKeys,
+    ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>>;
 }
 
 /// Real implementation that delegates to the tmux CLI functions above.
@@ -510,10 +614,20 @@ impl InjectorOps for RealInjector {
         session: &'a str,
         text: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
-        // Call the module-level free function.
         Box::pin(inject(session, text))
     }
     fn capture(&self, session: &str) -> Result<String, InjectionError> {
         capture(session)
+    }
+    fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError> {
+        send_keys(session, keys)
+    }
+    fn inject_interrupt<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        keys: &'a InterruptKeys,
+    ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
+        Box::pin(inject_interrupt(session, text, keys))
     }
 }

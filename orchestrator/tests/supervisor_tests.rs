@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use orchestrator::injector::{InjectionError, InjectorOps};
+use orchestrator::injector::{InjectionError, InjectorOps, InterruptKeys};
 use orchestrator::logger::Logger;
 use orchestrator::supervisor::{AgentConfig, Registry};
 
@@ -133,6 +133,19 @@ impl InjectorOps for MockInjector {
         } else {
             Ok("mock transcript".into())
         }
+    }
+
+    fn send_keys(&self, _session: &str, _keys: &str) -> Result<(), InjectionError> {
+        Ok(())
+    }
+
+    fn inject_interrupt<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        _keys: &'a InterruptKeys,
+    ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
+        self.inject(session, text)
     }
 }
 

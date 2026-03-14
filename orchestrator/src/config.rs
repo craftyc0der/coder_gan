@@ -60,6 +60,16 @@ pub struct AgentsToml {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct TimerEntry {
+    pub minutes: u64,
+    pub prompt_file: String,
+    #[serde(default)]
+    pub interrupt: bool,
+    #[serde(default)]
+    pub include_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AgentEntry {
     pub id: String,
     pub command: String,
@@ -69,6 +79,8 @@ pub struct AgentEntry {
     pub agent_type: AgentType,
     #[serde(default)]
     pub slack: Option<SlackAgentConfig>,
+    #[serde(default)]
+    pub timers: Vec<TimerEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -284,6 +296,27 @@ impl ProjectConfig {
             }
         }
 
+        // Validate timer entries
+        let all_ids: Vec<&str> = agents_toml.agents.iter().map(|a| a.id.as_str()).collect();
+        for agent in &agents_toml.agents {
+            for timer in &agent.timers {
+                // Validate timer prompt file exists
+                let prompt_path = dot_dir.join(&timer.prompt_file);
+                if !prompt_path.exists() {
+                    return Err(ConfigError::MissingPromptFile(prompt_path));
+                }
+                // Validate include_agents references
+                for ref_id in &timer.include_agents {
+                    if !all_ids.contains(&ref_id.as_str()) {
+                        return Err(ConfigError::InvalidAgentId(format!(
+                            "timer include_agents '{}' on agent '{}' does not match any agent",
+                            ref_id, agent.id
+                        )));
+                    }
+                }
+            }
+        }
+
         Ok(ProjectConfig {
             project_root,
             project_name,
@@ -345,10 +378,44 @@ impl ProjectConfig {
         Ok(prompts)
     }
 
+    /// Build resolved timer configs for all agents.
+    /// Each entry contains the rendered prompt text and all timer metadata.
+    pub fn resolved_timers(&self) -> Result<Vec<ResolvedTimer>, ConfigError> {
+        let mut timers = Vec::new();
+        for agent in &self.agents {
+            for timer in &agent.timers {
+                let prompt_path = self.dot_dir.join(&timer.prompt_file);
+                let raw = std::fs::read_to_string(&prompt_path)?;
+                let rendered = raw
+                    .replace("{{project_root}}", &self.project_root.display().to_string())
+                    .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
+                    .replace("{{agent_id}}", &agent.id);
+                timers.push(ResolvedTimer {
+                    agent_id: agent.id.clone(),
+                    minutes: timer.minutes,
+                    prompt: rendered,
+                    interrupt: timer.interrupt,
+                    include_agents: timer.include_agents.clone(),
+                });
+            }
+        }
+        Ok(timers)
+    }
+
     /// Derive the tmux session name for a given agent.
     pub fn tmux_session_for(&self, agent_id: &str) -> String {
         format!("{}-{}", self.project_name, agent_id)
     }
+}
+
+/// A fully resolved timer ready for the timer loop.
+#[derive(Debug, Clone)]
+pub struct ResolvedTimer {
+    pub agent_id: String,
+    pub minutes: u64,
+    pub prompt: String,
+    pub interrupt: bool,
+    pub include_agents: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

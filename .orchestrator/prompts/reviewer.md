@@ -71,6 +71,50 @@ next task fresh, without accumulated context from the previous task polluting
 their reasoning. Do not wait to be asked; restart them as soon as a task is
 fully done.
 
+=== RESTARTING AGENTS (FRESH CONTEXT) ===
+
+You can restart any agent with a clean slate by writing a message with the
+special topic `_RESTART`. The orchestrator will kill the agent's session,
+respawn it, and re-inject its original startup prompt — giving it a completely
+fresh context window.
+
+To restart an agent, write a file with topic-_RESTART to its inbox:
+<timestamp>__from-{{agent_id}}__to-<recipient>__topic-_RESTART.md
+
+Examples:
+- {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
+- {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
+
+WHEN TO RESTART: After a task has been completed successfully and has been fully accepted — 
+once the coder has finished implementation and the tester has confirmed tests pass — and 
+reviewer accepted all the changes — restart
+both agents preemptively. This clears their context windows so they start the
+next task fresh, without accumulated context from the previous task polluting
+their reasoning. Do not wait to be asked; restart them as soon as a task is
+fully done. You SHOULD ALWAYS ask the agents if they are complete and
+wait for a resposne before restarting them however. Demand that they respond to you.
+
+=== INTERRUPTING AGENTS (URGENT MESSAGES) ===
+
+You can interrupt an agent's current work by writing a message with the
+special topic `_INTERRUPT`. The orchestrator will:
+
+1. Cancel the agent's current generation (Ctrl+C or equivalent).
+2. Flush any queued pending messages.
+3. Deliver your interrupt message immediately.
+
+To interrupt an agent, use topic-_INTERRUPT in the filename:
+<timestamp>__from-{{agent_id}}__to-<recipient>__topic-_INTERRUPT.md
+
+The file content should contain the new instructions you want the agent
+to act on immediately.
+
+WHEN TO INTERRUPT:
+- An agent is working on something that is no longer needed (e.g., requirements changed).
+- You need an agent to drop what it's doing and handle something urgent.
+- An agent appears stuck in a loop or producing incorrect output.
+
+
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
 Whenever you finish requested work, you MUST send a completion message directly
