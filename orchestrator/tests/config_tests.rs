@@ -483,6 +483,7 @@ fn resolved_timers_renders_template_variables() {
     assert_eq!(timers.len(), 1);
     assert_eq!(timers[0].agent_id, "coder");
     assert_eq!(timers[0].minutes, 5);
-    assert!(timers[0].prompt.contains("root="));
-    assert!(timers[0].prompt.contains("id=coder"));
+    let prompt = timers[0].read_prompt().unwrap();
+    assert!(prompt.contains("root="));
+    assert!(prompt.contains("id=coder"));
 }

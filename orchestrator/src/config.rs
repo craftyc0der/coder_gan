@@ -379,21 +379,22 @@ impl ProjectConfig {
     }
 
     /// Build resolved timer configs for all agents.
-    /// Each entry contains the rendered prompt text and all timer metadata.
+    /// Stores paths and template variables so prompts are read fresh at fire time.
     pub fn resolved_timers(&self) -> Result<Vec<ResolvedTimer>, ConfigError> {
         let mut timers = Vec::new();
         for agent in &self.agents {
             for timer in &agent.timers {
                 let prompt_path = self.dot_dir.join(&timer.prompt_file);
-                let raw = std::fs::read_to_string(&prompt_path)?;
-                let rendered = raw
-                    .replace("{{project_root}}", &self.project_root.display().to_string())
-                    .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                    .replace("{{agent_id}}", &agent.id);
+                // Validate the file exists at load time
+                if !prompt_path.exists() {
+                    return Err(ConfigError::MissingPromptFile(prompt_path));
+                }
                 timers.push(ResolvedTimer {
                     agent_id: agent.id.clone(),
                     minutes: timer.minutes,
-                    prompt: rendered,
+                    prompt_path,
+                    project_root: self.project_root.display().to_string(),
+                    messages_dir: self.messages_dir.display().to_string(),
                     interrupt: timer.interrupt,
                     include_agents: timer.include_agents.clone(),
                 });
@@ -409,13 +410,28 @@ impl ProjectConfig {
 }
 
 /// A fully resolved timer ready for the timer loop.
+/// Prompt file is read fresh each time the timer fires.
 #[derive(Debug, Clone)]
 pub struct ResolvedTimer {
     pub agent_id: String,
     pub minutes: u64,
-    pub prompt: String,
+    pub prompt_path: PathBuf,
+    pub project_root: String,
+    pub messages_dir: String,
     pub interrupt: bool,
     pub include_agents: Vec<String>,
+}
+
+impl ResolvedTimer {
+    /// Read and render the prompt file. Called each time the timer fires
+    /// so edits to the file take effect without an orchestrator restart.
+    pub fn read_prompt(&self) -> Result<String, std::io::Error> {
+        let raw = std::fs::read_to_string(&self.prompt_path)?;
+        Ok(raw
+            .replace("{{project_root}}", &self.project_root)
+            .replace("{{messages_dir}}", &self.messages_dir)
+            .replace("{{agent_id}}", &self.agent_id))
+    }
 }
 
 // ---------------------------------------------------------------------------
