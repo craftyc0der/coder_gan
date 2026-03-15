@@ -509,7 +509,9 @@ fn inject_once(session: &str, text: &str) -> Result<(), InjectionError> {
 
     let result = (|| {
         run_tmux(&["load-buffer", tmp_path.to_str().unwrap()])?;
-        run_tmux(&["paste-buffer", "-p", "-t", session])?;
+        // Paste without -p (bracketed paste mode) — some agents like codex
+        // don't process Enter correctly when bracketed paste is active.
+        run_tmux(&["paste-buffer", "-t", session])?;
         // Wait for the paste to land in the terminal before sending Enter
         std::thread::sleep(std::time::Duration::from_millis(1000));
         run_tmux(&["send-keys", "-t", session, "Enter"])?;

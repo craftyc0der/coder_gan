@@ -73,7 +73,7 @@ async fn inject_uses_bracketed_paste_and_enter() {
 
     assert_eq!(lines.len(), 3);
     assert!(lines[0].starts_with("load-buffer "));
-    assert_eq!(lines[1], "paste-buffer -p -t demo-session");
+    assert_eq!(lines[1], "paste-buffer -t demo-session");
     assert_eq!(lines[2], "send-keys -t demo-session Enter");
 }
 
