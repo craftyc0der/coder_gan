@@ -532,7 +532,16 @@ impl Registry {
                 last_fired[i] = now;
 
                 // Build the prompt with optional status footer
-                let mut prompt = timer.prompt.clone();
+                let mut prompt = match timer.read_prompt() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(
+                            "[timer] failed to read prompt for '{}': {e}",
+                            timer.agent_id
+                        );
+                        continue;
+                    }
+                };
                 if !timer.include_agents.is_empty() {
                     prompt.push_str("\n\n--- AGENT STATUS ---\n");
                     let agents = self.agents.lock().await;
