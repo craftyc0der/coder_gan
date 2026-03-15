@@ -64,35 +64,14 @@ Examples:
 - {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
 - {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
 
-WHEN TO RESTART: After a task has been completed successfully — once the coder
-has finished implementation and the tester has confirmed tests pass — restart
-both agents preemptively. This clears their context windows so they start the
-next task fresh, without accumulated context from the previous task polluting
-their reasoning. Do not wait to be asked; restart them as soon as a task is
-fully done.
-
-=== RESTARTING AGENTS (FRESH CONTEXT) ===
-
-You can restart any agent with a clean slate by writing a message with the
-special topic `_RESTART`. The orchestrator will kill the agent's session,
-respawn it, and re-inject its original startup prompt — giving it a completely
-fresh context window.
-
-To restart an agent, write a file with topic-_RESTART to its inbox:
-<timestamp>__from-{{agent_id}}__to-<recipient>__topic-_RESTART.md
-
-Examples:
-- {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
-- {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
-
-WHEN TO RESTART: After a task has been completed successfully and has been fully accepted — 
-once the coder has finished implementation and the tester has confirmed tests pass — and 
-reviewer accepted all the changes — restart
-both agents preemptively. This clears their context windows so they start the
-next task fresh, without accumulated context from the previous task polluting
-their reasoning. Do not wait to be asked; restart them as soon as a task is
-fully done. You SHOULD ALWAYS ask the agents if they are complete and
-wait for a resposne before restarting them however. Demand that they respond to you.
+WHEN TO RESTART: After a task has been completed successfully and has been
+fully accepted — once the coder has finished implementation, the tester has
+confirmed tests pass, and the reviewer has accepted all changes — restart both
+agents preemptively. This clears their context windows so they start the next
+task fresh, without accumulated context from the previous task polluting their
+reasoning. Do not wait to be asked; restart them as soon as a task is fully
+done. You SHOULD ALWAYS ask the agents if they are complete and wait for a
+response before restarting them. Demand that they respond to you.
 
 === INTERRUPTING AGENTS (URGENT MESSAGES) ===
 

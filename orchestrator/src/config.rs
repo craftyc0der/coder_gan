@@ -517,6 +517,10 @@ pub fn init_project(project_path: &Path) -> Result<(), ConfigError> {
     std::fs::write(prompts_dir.join("coder.md"), DEFAULT_CODER_PROMPT)?;
     std::fs::write(prompts_dir.join("tester.md"), DEFAULT_TESTER_PROMPT)?;
     std::fs::write(prompts_dir.join("reviewer.md"), DEFAULT_REVIEWER_PROMPT)?;
+    std::fs::write(
+        prompts_dir.join("reviewer_status_check.md"),
+        DEFAULT_REVIEWER_STATUS_CHECK_PROMPT,
+    )?;
 
     Ok(())
 }
@@ -596,6 +600,19 @@ id = "reviewer"
 command = "copilot"
 prompt_file = "prompts/reviewer.md"
 allowed_write_dirs = ["review/"]
+
+# Re-inject the full reviewer prompt every 30 minutes to prevent context drift
+[[agents.timers]]
+minutes = 30
+prompt_file = "prompts/reviewer.md"
+interrupt = false
+
+# Every 5 minutes, inject agent statuses and ask if there's work to assign
+[[agents.timers]]
+minutes = 5
+prompt_file = "prompts/reviewer_status_check.md"
+interrupt = false
+include_agents = ["coder", "tester"]
 "#;
 
 const DEFAULT_CODER_PROMPT: &str = r#"You are the CODER agent in a multi-agent coding system.
@@ -823,12 +840,34 @@ Examples:
 - {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
 - {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
 
-WHEN TO RESTART: After a task has been completed successfully — once the coder
-has finished implementation and the tester has confirmed tests pass — restart
-both agents preemptively. This clears their context windows so they start the
-next task fresh, without accumulated context from the previous task polluting
-their reasoning. Do not wait to be asked; restart them as soon as a task is
-fully done.
+WHEN TO RESTART: After a task has been completed successfully and has been
+fully accepted — once the coder has finished implementation, the tester has
+confirmed tests pass, and the reviewer has accepted all changes — restart both
+agents preemptively. This clears their context windows so they start the next
+task fresh, without accumulated context from the previous task polluting their
+reasoning. Do not wait to be asked; restart them as soon as a task is fully
+done. You SHOULD ALWAYS ask the agents if they are complete and wait for a
+response before restarting them. Demand that they respond to you.
+
+=== INTERRUPTING AGENTS (URGENT MESSAGES) ===
+
+You can interrupt an agent's current work by writing a message with the
+special topic `_INTERRUPT`. The orchestrator will:
+
+1. Cancel the agent's current generation (Ctrl+C or equivalent).
+2. Flush any queued pending messages.
+3. Deliver your interrupt message immediately.
+
+To interrupt an agent, use topic-_INTERRUPT in the filename:
+<timestamp>__from-{{agent_id}}__to-<recipient>__topic-_INTERRUPT.md
+
+The file content should contain the new instructions you want the agent
+to act on immediately.
+
+WHEN TO INTERRUPT:
+- An agent is working on something that is no longer needed (e.g., requirements changed).
+- You need an agent to drop what it's doing and handle something urgent.
+- An agent appears stuck in a loop or producing incorrect output.
 
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
@@ -854,6 +893,21 @@ TOPIC: <topic>
 === GETTING STARTED ===
 
 Wait for messages from the coder or tester before taking action. You act on
-request, not proactively.
+request, not proactively. All context you need will be provided in the messages
+you receive.
+"#;
+
+const DEFAULT_REVIEWER_STATUS_CHECK_PROMPT: &str = r#"=== AGENT STATUS CHECK ===
+
+Below is the current status of the other agents in the system. Review their
+activity states and consider:
+
+1. Are any agents IDLE with no assigned work? If so, do you have tasks to
+   assign them?
+2. Are any agents BUSY on something that should be reprioritized?
+3. Has any agent been idle for too long, suggesting it may need a restart?
+
+If you have work to assign to an idle agent, send them a message now with
+clear instructions. If all agents are productively busy, no action is needed.
 "#;
 
