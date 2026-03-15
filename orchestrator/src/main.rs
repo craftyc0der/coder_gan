@@ -39,6 +39,9 @@ enum Commands {
         /// Agent to run spike against (defaults to first agent in config)
         #[arg(long)]
         agent: Option<String>,
+        /// Test interrupt key sequences instead of normal injection
+        #[arg(long)]
+        interrupt: bool,
     },
     /// Launch all agents and start the message routing loop
     Run {
@@ -97,10 +100,14 @@ async fn main() {
             let project_path = resolve_path(&path);
             cmd_init(&project_path);
         }
-        Commands::Spike { path, agent } => {
+        Commands::Spike { path, agent, interrupt } => {
             let project_path = resolve_path(&path);
             let config = load_config_or_exit(&project_path);
-            spike::run_spike(config, agent.as_deref()).await;
+            if interrupt {
+                spike::run_spike_interrupt(config, agent.as_deref()).await;
+            } else {
+                spike::run_spike(config, agent.as_deref()).await;
+            }
         }
         Commands::Run { path } => {
             let project_path = resolve_path(&path);
@@ -262,6 +269,32 @@ async fn run_orchestrator(config: ProjectConfig) {
         transcript_registry.transcript_loop().await;
     });
 
+    // Start the activity detection loop (pane hash diff every 3s)
+    let activity_registry = registry.clone();
+    let activity_handle = tokio::spawn(async move {
+        activity_registry.activity_loop().await;
+    });
+
+    // Start the timer loop for recurring prompt injections
+    let timer_handle = match config.resolved_timers() {
+        Ok(timers) if !timers.is_empty() => {
+            println!(
+                "Timers:    {} configured",
+                timers.len()
+            );
+            let timer_registry = registry.clone();
+            let timer_logger = logger.clone();
+            Some(tokio::spawn(async move {
+                timer_registry.timer_loop(timers, timer_logger).await;
+            }))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("Warning: failed to load timer prompts: {e}");
+            None
+        }
+    };
+
     // Start the scope enforcement watcher
     scope::start_scope_watcher(
         config.project_root.clone(),
@@ -281,6 +314,10 @@ async fn run_orchestrator(config: ProjectConfig) {
     println!("\nShutting down...");
     health_handle.abort();
     transcript_handle.abort();
+    activity_handle.abort();
+    if let Some(h) = timer_handle {
+        h.abort();
+    }
     registry.kill_all().await;
     logger.log(Event::OrchestratorStop);
     println!("All agents killed. Goodbye.");

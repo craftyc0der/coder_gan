@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use orchestrator::config::{AgentEntry, ProjectConfig};
-use orchestrator::injector::{InjectionError, InjectorOps};
-use orchestrator::spike::{run_spike_with_deps, SpikeTimings};
+use orchestrator::injector::{InjectionError, InjectorOps, InterruptKeys};
+use orchestrator::spike::{run_spike_with_deps, run_spike_interrupt_with_deps, SpikeTimings};
 
 #[derive(Default)]
 struct MockInjector {
@@ -16,14 +16,20 @@ struct MockInjector {
     injected: Mutex<Vec<(String, String)>>,
     captured: Mutex<Vec<String>>,
     killed: Mutex<Vec<String>>,
+    sent_keys: Mutex<Vec<(String, String)>>,
 
     spawn_error: Option<String>,
     capture_result: Option<String>,
+    /// Sequence of capture results — if set, capture() pops from front.
+    /// Falls back to `capture_result` when empty.
+    capture_sequence: Mutex<Vec<String>>,
     inject_fail_at: Option<usize>,
     inject_count: AtomicUsize,
 
     alive_after_kill: bool,
     validation_file: Option<PathBuf>,
+    /// Second validation file (for interrupt post-inject test).
+    interrupt_validation_file: Option<PathBuf>,
     has_session_calls: Mutex<u32>,
 }
 
@@ -76,6 +82,12 @@ impl InjectorOps for MockInjector {
                 let _ = std::fs::write(path, "validation ok");
             }
         }
+        // Write interrupt validation file on the second inject call
+        if idx == 2 {
+            if let Some(path) = &self.interrupt_validation_file {
+                let _ = std::fs::write(path, "spike interrupt test passed");
+            }
+        }
         let result = match self.inject_fail_at {
             Some(fail_at) if fail_at == idx => Err(InjectionError::TmuxCommand {
                 step: "inject".into(),
@@ -88,6 +100,13 @@ impl InjectorOps for MockInjector {
 
     fn capture(&self, session: &str) -> Result<String, InjectionError> {
         self.captured.lock().unwrap().push(session.to_string());
+        // Try capture_sequence first
+        {
+            let mut seq = self.capture_sequence.lock().unwrap();
+            if !seq.is_empty() {
+                return Ok(seq.remove(0));
+            }
+        }
         match &self.capture_result {
             Some(text) => Ok(text.clone()),
             None => Err(InjectionError::TmuxCommand {
@@ -95,6 +114,33 @@ impl InjectorOps for MockInjector {
                 detail: "mock: no capture configured".into(),
             }),
         }
+    }
+
+    fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError> {
+        self.sent_keys
+            .lock()
+            .unwrap()
+            .push((session.to_string(), keys.to_string()));
+        Ok(())
+    }
+
+    fn inject_interrupt<'a>(
+        &'a self,
+        session: &'a str,
+        text: &'a str,
+        keys: &'a InterruptKeys,
+    ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
+        // Record the keys that were sent
+        self.sent_keys
+            .lock()
+            .unwrap()
+            .push((session.to_string(), keys.cancel.to_string()));
+        self.sent_keys
+            .lock()
+            .unwrap()
+            .push((session.to_string(), keys.clear.to_string()));
+        // Delegate to normal inject
+        self.inject(session, text)
     }
 }
 
@@ -127,6 +173,7 @@ fn make_agents() -> Vec<AgentEntry> {
             allowed_write_dirs: vec!["src/".into()],
             agent_type: Default::default(),
             slack: None,
+            timers: vec![],
         },
         AgentEntry {
             id: "tester".into(),
@@ -135,6 +182,7 @@ fn make_agents() -> Vec<AgentEntry> {
             allowed_write_dirs: vec!["tests/".into()],
             agent_type: Default::default(),
             slack: None,
+            timers: vec![],
         },
     ]
 }
@@ -331,4 +379,208 @@ async fn capture_writes_transcript_file() {
 
     let contents = read_first_file(&transcript_dir).unwrap_or_default();
     assert!(contents.contains("pane output"));
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt spike tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn interrupt_spike_sends_correct_keys_for_claude() {
+    let tmp = TempDir::new().unwrap();
+    // Use "claude" as command to test C-c / C-u keys
+    let agents = vec![AgentEntry {
+        id: "coder".into(),
+        command: "claude".into(),
+        prompt_file: "prompts/coder.md".into(),
+        allowed_write_dirs: vec!["src/".into()],
+        agent_type: Default::default(),
+        slack: None,
+        timers: vec![],
+    }];
+    let config = make_config(&tmp, agents);
+    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+
+    // capture_sequence: first call is pre-interrupt baseline, then 3 stable calls
+    // for prompt recovery (need stable_count >= 2), then captures for post-inject polling
+    let inj = MockInjector {
+        capture_sequence: Mutex::new(vec![
+            "agent busy generating...".into(), // pre-interrupt baseline
+            "$ ".into(),                        // poll 1: sets last_hash
+            "$ ".into(),                        // poll 2: stable_count = 1
+            "$ ".into(),                        // poll 3: stable_count = 2 → recovered
+            "$ ".into(),                        // post-interrupt transcript
+            "$ done".into(),                    // post-interrupt poll captures
+        ]),
+        interrupt_validation_file: Some(interrupt_file),
+        ..Default::default()
+    };
+
+    let result = run_spike_interrupt_with_deps(
+        config,
+        None,
+        &inj,
+        &SpikeTimings::for_testing(),
+    )
+    .await;
+    assert!(result.is_ok(), "spike interrupt failed: {:?}", result);
+
+    // Verify cancel and clear keys were sent
+    let sent = inj.sent_keys.lock().unwrap();
+    assert!(sent.len() >= 2, "expected at least 2 send_keys calls, got {}", sent.len());
+    assert_eq!(sent[0].1, "C-c", "cancel key should be C-c for claude");
+    assert_eq!(sent[1].1, "C-u", "clear key should be C-u for claude");
+}
+
+#[tokio::test]
+async fn interrupt_spike_sends_escape_for_copilot() {
+    let tmp = TempDir::new().unwrap();
+    let agents = vec![AgentEntry {
+        id: "coder".into(),
+        command: "copilot".into(),
+        prompt_file: "prompts/coder.md".into(),
+        allowed_write_dirs: vec!["src/".into()],
+        agent_type: Default::default(),
+        slack: None,
+        timers: vec![],
+    }];
+    let config = make_config(&tmp, agents);
+    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+
+    let inj = MockInjector {
+        capture_sequence: Mutex::new(vec![
+            "copilot running...".into(),
+            "> ".into(),
+            "> ".into(),
+            "> ".into(),
+            "> ".into(),
+            "> done".into(),
+        ]),
+        interrupt_validation_file: Some(interrupt_file),
+        ..Default::default()
+    };
+
+    let result = run_spike_interrupt_with_deps(
+        config,
+        None,
+        &inj,
+        &SpikeTimings::for_testing(),
+    )
+    .await;
+    assert!(result.is_ok());
+
+    let sent = inj.sent_keys.lock().unwrap();
+    assert!(sent.len() >= 2);
+    assert_eq!(sent[0].1, "Escape", "cancel key should be Escape for copilot");
+    assert_eq!(sent[1].1, "Escape", "clear key should be Escape for copilot");
+}
+
+#[tokio::test]
+async fn interrupt_spike_fails_when_pane_never_stabilizes() {
+    let tmp = TempDir::new().unwrap();
+    let config = make_config(&tmp, make_agents());
+
+    // Every capture returns different content — pane never stabilizes
+    let inj = MockInjector {
+        capture_sequence: Mutex::new(vec![
+            "output 1".into(),
+            "output 2".into(),
+            "output 3".into(),
+            "output 4".into(),
+            "output 5".into(),
+            "output 6".into(),
+            "output 7".into(),
+        ]),
+        ..Default::default()
+    };
+
+    let result = run_spike_interrupt_with_deps(
+        config,
+        None,
+        &inj,
+        &SpikeTimings::for_testing(),
+    )
+    .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("did not return to prompt"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn interrupt_spike_post_inject_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    let agents = vec![AgentEntry {
+        id: "coder".into(),
+        command: "gemini".into(),
+        prompt_file: "prompts/coder.md".into(),
+        allowed_write_dirs: vec!["src/".into()],
+        agent_type: Default::default(),
+        slack: None,
+        timers: vec![],
+    }];
+    let config = make_config(&tmp, agents);
+    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+
+    let inj = MockInjector {
+        capture_sequence: Mutex::new(vec![
+            "gemini thinking...".into(),
+            "❯ ".into(),
+            "❯ ".into(),
+            "❯ ".into(),
+            "❯ ".into(),
+            "❯ done".into(),
+        ]),
+        interrupt_validation_file: Some(interrupt_file.clone()),
+        ..Default::default()
+    };
+
+    let result = run_spike_interrupt_with_deps(
+        config,
+        None,
+        &inj,
+        &SpikeTimings::for_testing(),
+    )
+    .await;
+    assert!(result.is_ok());
+
+    // Verify the interrupt validation file was created
+    assert!(interrupt_file.exists(), "interrupt validation file should exist");
+    let content = std::fs::read_to_string(&interrupt_file).unwrap();
+    assert!(content.contains("spike interrupt test passed"));
+
+    // Verify gemini-specific keys (C-c / C-c)
+    let sent = inj.sent_keys.lock().unwrap();
+    assert!(sent.len() >= 2);
+    assert_eq!(sent[0].1, "C-c");
+    assert_eq!(sent[1].1, "C-c");
+}
+
+#[tokio::test]
+async fn interrupt_keys_for_command_returns_correct_keys() {
+    // claude / codex — default
+    let keys = InterruptKeys::for_command("claude");
+    assert_eq!(keys.cancel, "C-c");
+    assert_eq!(keys.clear, "C-u");
+
+    let keys = InterruptKeys::for_command("codex");
+    assert_eq!(keys.cancel, "C-c");
+    assert_eq!(keys.clear, "C-u");
+
+    // copilot
+    let keys = InterruptKeys::for_command("copilot");
+    assert_eq!(keys.cancel, "Escape");
+    assert_eq!(keys.clear, "Escape");
+
+    // gemini
+    let keys = InterruptKeys::for_command("gemini");
+    assert_eq!(keys.cancel, "C-c");
+    assert_eq!(keys.clear, "C-c");
+
+    // cursor agent (multi-word command)
+    let keys = InterruptKeys::for_command("cursor agent");
+    assert_eq!(keys.cancel, "C-c");
+    assert_eq!(keys.clear, "C-c");
 }

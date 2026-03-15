@@ -8,6 +8,7 @@ fn agent(id: &str, command: &str) -> AgentEntry {
         allowed_write_dirs: vec!["src/".to_string()],
         agent_type: Default::default(),
         slack: None,
+        timers: vec![],
     }
 }
 

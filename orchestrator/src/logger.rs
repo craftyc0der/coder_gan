@@ -114,6 +114,32 @@ pub enum Event {
         path: String,
     },
 
+    #[serde(rename = "spike_interrupt_sent")]
+    SpikeInterruptSent {
+        agent_id: String,
+        cancel_key: String,
+        clear_key: String,
+    },
+
+    #[serde(rename = "spike_interrupt_confirmed")]
+    SpikeInterruptConfirmed {
+        agent_id: String,
+        detail: String,
+    },
+
+    #[serde(rename = "spike_interrupt_failed")]
+    SpikeInterruptFailed {
+        agent_id: String,
+        detail: String,
+    },
+
+    #[serde(rename = "timer_fired")]
+    TimerFired {
+        agent_id: String,
+        minutes: u64,
+        prompt_file: String,
+    },
+
     // Slack agent events
     #[cfg(feature = "slack")]
     #[serde(rename = "slack_connected")]

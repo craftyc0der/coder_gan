@@ -327,15 +327,26 @@ impl MessageWatcher {
 
         // Deduplication by content hash — lives here so it applies whether
         // called from routing_loop or directly in tests.
-        if let Ok(bytes) = std::fs::read(&meta.path) {
-            let hash = format!("{:x}", Sha256::digest(&bytes));
-            let mut seen = self.seen_hashes.lock().await;
-            if seen.contains(&hash) {
-                println!("[watcher] skipping duplicate: {}", meta.filename);
-                let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
-                return;
+        // Skip dedup for special topics (_RESTART, _INTERRUPT) — these are
+        // commands that must always be processed regardless of content.
+        let is_special = meta.topic.eq_ignore_ascii_case("_restart")
+            || meta.topic.ends_with("_RESTART")
+            || meta.topic.eq_ignore_ascii_case("_interrupt")
+            || meta.topic.ends_with("_INTERRUPT")
+            || meta.topic.eq_ignore_ascii_case("_timer")
+            || meta.topic.ends_with("_TIMER");
+
+        if !is_special {
+            if let Ok(bytes) = std::fs::read(&meta.path) {
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                let mut seen = self.seen_hashes.lock().await;
+                if seen.contains(&hash) {
+                    println!("[watcher] skipping duplicate: {}", meta.filename);
+                    let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
+                    return;
+                }
+                seen.insert(hash);
             }
-            seen.insert(hash);
         }
 
         // Handle _RESTART topic: restart the recipient agent with fresh context

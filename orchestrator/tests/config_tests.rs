@@ -60,6 +60,7 @@ fn make_agents() -> Vec<AgentEntry> {
             allowed_write_dirs: vec!["src/".into()],
             agent_type: Default::default(),
             slack: None,
+            timers: vec![],
         },
         AgentEntry {
             id: "tester".into(),
@@ -68,6 +69,7 @@ fn make_agents() -> Vec<AgentEntry> {
             allowed_write_dirs: vec!["tests/".into()],
             agent_type: Default::default(),
             slack: None,
+            timers: vec![],
         },
     ]
 }
@@ -352,4 +354,135 @@ fn agent_configs_resolve_inbox_and_allowed_write_dirs() {
     assert_eq!(coder.tmux_session, "testproject-coder");
     assert_eq!(coder.inbox_dir, config.messages_dir.join("to_coder"));
     assert_eq!(coder.allowed_write_dirs[0], tmp.path().join("src/"));
+}
+
+#[test]
+fn load_parses_timer_entries() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "startup prompt");
+    write_prompt(&dot_dir, "status_check.md", "check status");
+
+    let toml = r#"
+        [[agents]]
+        id = "coder"
+        command = "claude"
+        prompt_file = "prompts/coder.md"
+        allowed_write_dirs = ["src/"]
+
+        [[agents.timers]]
+        minutes = 5
+        prompt_file = "prompts/status_check.md"
+        interrupt = false
+        include_agents = ["coder"]
+
+        [[agents.timers]]
+        minutes = 30
+        prompt_file = "prompts/coder.md"
+        interrupt = true
+    "#;
+    write_agents_toml(&dot_dir, toml);
+
+    let config = ProjectConfig::load(tmp.path()).unwrap();
+    assert_eq!(config.agents[0].timers.len(), 2);
+    assert_eq!(config.agents[0].timers[0].minutes, 5);
+    assert!(!config.agents[0].timers[0].interrupt);
+    assert_eq!(config.agents[0].timers[0].include_agents, vec!["coder"]);
+    assert_eq!(config.agents[0].timers[1].minutes, 30);
+    assert!(config.agents[0].timers[1].interrupt);
+    assert!(config.agents[0].timers[1].include_agents.is_empty());
+}
+
+#[test]
+fn load_defaults_timers_to_empty() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "hello");
+    write_agents_toml(&dot_dir, &minimal_agents_toml("coder"));
+
+    let config = ProjectConfig::load(tmp.path()).unwrap();
+    assert!(config.agents[0].timers.is_empty());
+}
+
+#[test]
+fn load_rejects_timer_with_missing_prompt_file() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "hello");
+
+    let toml = r#"
+        [[agents]]
+        id = "coder"
+        command = "claude"
+        prompt_file = "prompts/coder.md"
+        allowed_write_dirs = ["src/"]
+
+        [[agents.timers]]
+        minutes = 10
+        prompt_file = "prompts/nonexistent.md"
+    "#;
+    write_agents_toml(&dot_dir, toml);
+
+    match ProjectConfig::load(tmp.path()) {
+        Err(ConfigError::MissingPromptFile(_)) => {}
+        Err(e) => panic!("expected MissingPromptFile, got {e}"),
+        Ok(_) => panic!("expected MissingPromptFile, got Ok"),
+    }
+}
+
+#[test]
+fn load_rejects_timer_with_invalid_include_agents() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "hello");
+
+    let toml = r#"
+        [[agents]]
+        id = "coder"
+        command = "claude"
+        prompt_file = "prompts/coder.md"
+        allowed_write_dirs = ["src/"]
+
+        [[agents.timers]]
+        minutes = 10
+        prompt_file = "prompts/coder.md"
+        include_agents = ["nonexistent_agent"]
+    "#;
+    write_agents_toml(&dot_dir, toml);
+
+    match ProjectConfig::load(tmp.path()) {
+        Err(ConfigError::InvalidAgentId(msg)) => {
+            assert!(msg.contains("nonexistent_agent"));
+        }
+        Err(e) => panic!("expected InvalidAgentId, got {e}"),
+        Ok(_) => panic!("expected InvalidAgentId, got Ok"),
+    }
+}
+
+#[test]
+fn resolved_timers_renders_template_variables() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(&dot_dir, "coder.md", "root={{project_root}} id={{agent_id}}");
+
+    let toml = r#"
+        [[agents]]
+        id = "coder"
+        command = "claude"
+        prompt_file = "prompts/coder.md"
+        allowed_write_dirs = ["src/"]
+
+        [[agents.timers]]
+        minutes = 5
+        prompt_file = "prompts/coder.md"
+    "#;
+    write_agents_toml(&dot_dir, toml);
+
+    let config = ProjectConfig::load(tmp.path()).unwrap();
+    let timers = config.resolved_timers().unwrap();
+    assert_eq!(timers.len(), 1);
+    assert_eq!(timers[0].agent_id, "coder");
+    assert_eq!(timers[0].minutes, 5);
+    assert!(timers[0].prompt.contains("root="));
+    assert!(timers[0].prompt.contains("id=coder"));
 }
