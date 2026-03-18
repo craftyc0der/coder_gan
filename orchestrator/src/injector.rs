@@ -3,6 +3,8 @@ use std::pin::Pin;
 use std::process::Command;
 use tokio::time::{sleep, Duration};
 
+use crate::config::SplitDirection;
+
 const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 1;
 
@@ -129,6 +131,84 @@ pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionE
             step: "set-option set-titles-string".into(),
             detail: format!("exited with {title_string_status}"),
         });
+    }
+
+    Ok(open_terminal_window(session))
+}
+
+/// Spawn a detached tmux session with multiple panes for a worker group.
+///
+/// The first command in `cmds` creates the initial pane (window 0, pane 0).
+/// Each subsequent command is added via `split-window` using the specified
+/// layout direction.  Returns the terminal window handle (same semantics as
+/// `spawn_session`).
+pub fn spawn_group_session(
+    session: &str,
+    cmds: &[&str],
+    layout: &SplitDirection,
+) -> Result<Option<u32>, InjectionError> {
+    if cmds.is_empty() {
+        return Err(InjectionError::TmuxCommand {
+            step: "spawn_group_session".into(),
+            detail: "no commands provided".into(),
+        });
+    }
+
+    // Create the session with the first command
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", session, "-x", "220", "-y", "50", cmds[0]])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "new-session".into(),
+            detail: e.to_string(),
+        })?;
+    if !status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "new-session".into(),
+            detail: format!("exited with {status}"),
+        });
+    }
+
+    // Add subsequent panes via split-window
+    let split_flag = match layout {
+        SplitDirection::Horizontal => "-h", // left|right
+        SplitDirection::Vertical => "-v",   // top|bottom
+    };
+    for cmd in cmds.iter().skip(1) {
+        let status = Command::new("tmux")
+            .args(["split-window", split_flag, "-t", session, cmd])
+            .status()
+            .map_err(|e| InjectionError::TmuxCommand {
+                step: "split-window".into(),
+                detail: e.to_string(),
+            })?;
+        if !status.success() {
+            return Err(InjectionError::TmuxCommand {
+                step: "split-window".into(),
+                detail: format!("exited with {status}"),
+            });
+        }
+    }
+
+    // Balance pane sizes
+    let layout_name = match layout {
+        SplitDirection::Horizontal => "even-horizontal",
+        SplitDirection::Vertical => "even-vertical",
+    };
+    let _ = Command::new("tmux")
+        .args(["select-layout", "-t", session, layout_name])
+        .status();
+
+    // Apply session options (same as spawn_session)
+    for (opt, val) in &[
+        ("mouse", "on"),
+        ("history-limit", "100000"),
+        ("set-titles", "on"),
+        ("set-titles-string", "#S"),
+    ] {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", session, opt, val])
+            .status();
     }
 
     Ok(open_terminal_window(session))
@@ -574,6 +654,15 @@ pub trait InjectorOps: Send + Sync {
     /// Spawn a tmux session. Returns the terminal handle if one was
     /// opened, or `None` (e.g. in tests or headless mode).
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError>;
+    /// Spawn a tmux session with multiple panes for a worker group.
+    /// The first command in `cmds` gets pane 0; subsequent commands are split
+    /// in the given direction.  Returns the terminal window handle.
+    fn spawn_group_session(
+        &self,
+        session: &str,
+        cmds: &[&str],
+        layout: &SplitDirection,
+    ) -> Result<Option<u32>, InjectionError>;
     /// Kill the running process inside the pane and restart it with a new
     /// command, keeping the tmux session (and any attached terminal) alive.
     fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError>;
@@ -607,6 +696,14 @@ impl InjectorOps for RealInjector {
     }
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
         spawn_session(session, cmd)
+    }
+    fn spawn_group_session(
+        &self,
+        session: &str,
+        cmds: &[&str],
+        layout: &SplitDirection,
+    ) -> Result<Option<u32>, InjectionError> {
+        spawn_group_session(session, cmds, layout)
     }
     fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError> {
         respawn_pane(session, cmd)

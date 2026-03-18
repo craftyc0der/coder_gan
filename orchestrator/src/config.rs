@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::supervisor::AgentConfig;
+use crate::supervisor::{AgentConfig, WorkerGroupConfig};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -18,6 +18,7 @@ pub enum ConfigError {
     NoAgents,
     InvalidAgentId(String),
     SlackConfigError(String),
+    InvalidWorkerGroup(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -40,6 +41,7 @@ impl fmt::Display for ConfigError {
                 id
             ),
             ConfigError::SlackConfigError(e) => write!(f, "Slack config error: {e}"),
+            ConfigError::InvalidWorkerGroup(e) => write!(f, "Invalid worker_group: {e}"),
         }
     }
 }
@@ -54,9 +56,41 @@ impl From<std::io::Error> for ConfigError {
 // TOML schema
 // ---------------------------------------------------------------------------
 
+/// How panes are arranged in a worker-group tmux session.
+/// `Horizontal` splits left|right; `Vertical` splits top|bottom.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitDirection {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+/// A named group of agents that are always launched together in the same tmux
+/// session, arranged side-by-side according to `layout`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkerGroupEntry {
+    /// Logical name for this group (used to name the tmux session).
+    pub id: String,
+    /// Ordered list of agent IDs that belong to this group.
+    pub agents: Vec<String>,
+    /// How to split the tmux window: horizontal (left|right) or vertical (top|bottom).
+    #[serde(default)]
+    pub layout: SplitDirection,
+    /// How many instances of this group to launch.
+    #[serde(default = "default_count")]
+    pub count: u32,
+}
+
+fn default_count() -> u32 {
+    1
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AgentsToml {
     pub agents: Vec<AgentEntry>,
+    #[serde(default)]
+    pub worker_groups: Vec<WorkerGroupEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +273,7 @@ pub struct ProjectConfig {
     pub state_path: PathBuf,
     pub transcript_dir: PathBuf,
     pub agents: Vec<AgentEntry>,
+    pub worker_groups: Vec<WorkerGroupEntry>,
 }
 
 impl ProjectConfig {
@@ -296,8 +331,32 @@ impl ProjectConfig {
             }
         }
 
-        // Validate timer entries
+        // Validate worker groups
         let all_ids: Vec<&str> = agents_toml.agents.iter().map(|a| a.id.as_str()).collect();
+        for group in &agents_toml.worker_groups {
+            if group.agents.is_empty() {
+                return Err(ConfigError::InvalidWorkerGroup(format!(
+                    "worker_group '{}' has no agents listed",
+                    group.id
+                )));
+            }
+            if group.count == 0 {
+                return Err(ConfigError::InvalidWorkerGroup(format!(
+                    "worker_group '{}' has count = 0; set count >= 1",
+                    group.id
+                )));
+            }
+            for agent_ref in &group.agents {
+                if !all_ids.contains(&agent_ref.as_str()) {
+                    return Err(ConfigError::InvalidWorkerGroup(format!(
+                        "worker_group '{}' references agent '{}' which is not defined in [[agents]]",
+                        group.id, agent_ref
+                    )));
+                }
+            }
+        }
+
+        // Validate timer entries
         for agent in &agents_toml.agents {
             for timer in &agent.timers {
                 // Validate timer prompt file exists
@@ -326,14 +385,37 @@ impl ProjectConfig {
             state_path,
             transcript_dir,
             agents: agents_toml.agents,
+            worker_groups: agents_toml.worker_groups,
         })
     }
 
     /// Create all required directories under `.orchestrator/`.
     pub fn ensure_dirs(&self) -> Result<(), std::io::Error> {
+        // Standalone agents and template agents not referenced in any group
+        let grouped_ids: std::collections::HashSet<&str> = self
+            .worker_groups
+            .iter()
+            .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
+            .collect();
+
         for agent in &self.agents {
-            std::fs::create_dir_all(self.messages_dir.join(format!("to_{}", agent.id)))?;
+            if !grouped_ids.contains(agent.id.as_str()) {
+                std::fs::create_dir_all(self.messages_dir.join(format!("to_{}", agent.id)))?;
+            }
         }
+
+        // Expanded group agent IDs
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                for agent_id in &group.agents {
+                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
+                    std::fs::create_dir_all(
+                        self.messages_dir.join(format!("to_{}", expanded_id)),
+                    )?;
+                }
+            }
+        }
+
         std::fs::create_dir_all(self.messages_dir.join("processed"))?;
         std::fs::create_dir_all(self.messages_dir.join("dead_letter"))?;
         std::fs::create_dir_all(&self.log_dir)?;
@@ -343,27 +425,132 @@ impl ProjectConfig {
     }
 
     /// Convert agent entries into supervisor AgentConfig structs.
+    ///
+    /// Standalone agents (not referenced in any worker_group) get their own session.
+    /// Grouped agents are expanded per-instance with suffixed IDs when count > 1,
+    /// and their tmux_target points at a specific pane within the shared session.
     pub fn agent_configs(&self) -> Vec<AgentConfig> {
-        self.agents
+        let grouped_ids: std::collections::HashSet<&str> = self
+            .worker_groups
             .iter()
-            .map(|a| AgentConfig {
+            .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
+            .collect();
+
+        let mut configs = Vec::new();
+
+        // Standalone agents
+        for a in &self.agents {
+            if grouped_ids.contains(a.id.as_str()) {
+                continue;
+            }
+            let session = self.tmux_session_for(&a.id);
+            configs.push(AgentConfig {
                 agent_id: a.id.clone(),
                 cli_command: a.command.clone(),
-                tmux_session: self.tmux_session_for(&a.id),
+                tmux_session: session.clone(),
+                tmux_target: session,
                 inbox_dir: self.messages_dir.join(format!("to_{}", a.id)),
                 allowed_write_dirs: a
                     .allowed_write_dirs
                     .iter()
                     .map(|d| self.project_root.join(d))
                     .collect(),
-            })
-            .collect()
+            });
+        }
+
+        // Grouped agents — expanded per instance
+        let agent_map: HashMap<&str, &AgentEntry> =
+            self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                let session = self.group_session_for(&group.id, instance, group.count);
+                for (pane_idx, agent_id) in group.agents.iter().enumerate() {
+                    let a = match agent_map.get(agent_id.as_str()) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
+                    let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    configs.push(AgentConfig {
+                        agent_id: expanded_id.clone(),
+                        cli_command: a.command.clone(),
+                        tmux_session: session.clone(),
+                        tmux_target,
+                        inbox_dir: self.messages_dir.join(format!("to_{}", expanded_id)),
+                        allowed_write_dirs: a
+                            .allowed_write_dirs
+                            .iter()
+                            .map(|d| self.project_root.join(d))
+                            .collect(),
+                    });
+                }
+            }
+        }
+
+        configs
+    }
+
+    /// Build the list of WorkerGroupConfigs for the supervisor to spawn as
+    /// grouped tmux sessions.  Each config describes one session instance.
+    pub fn worker_group_configs(&self) -> Vec<WorkerGroupConfig> {
+        let agent_map: HashMap<&str, &AgentEntry> =
+            self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+
+        let mut groups = Vec::new();
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                let session = self.group_session_for(&group.id, instance, group.count);
+                let mut members = Vec::new();
+                for (pane_idx, agent_id) in group.agents.iter().enumerate() {
+                    let a = match agent_map.get(agent_id.as_str()) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
+                    let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    members.push(AgentConfig {
+                        agent_id: expanded_id.clone(),
+                        cli_command: a.command.clone(),
+                        tmux_session: session.clone(),
+                        tmux_target,
+                        inbox_dir: self.messages_dir.join(format!("to_{}", expanded_id)),
+                        allowed_write_dirs: a
+                            .allowed_write_dirs
+                            .iter()
+                            .map(|d| self.project_root.join(d))
+                            .collect(),
+                    });
+                }
+                groups.push(WorkerGroupConfig {
+                    group_id: group.id.clone(),
+                    session_name: session,
+                    layout: group.layout.clone(),
+                    members,
+                });
+            }
+        }
+        groups
     }
 
     /// Read and render startup prompt files, substituting template variables.
+    ///
+    /// For grouped agents, each instance gets its own rendered prompt with the
+    /// expanded agent_id (e.g. `coder-1`, `coder-2`) substituted.
     pub fn startup_prompts(&self) -> Result<HashMap<String, String>, ConfigError> {
         let mut prompts = HashMap::new();
+
+        let grouped_ids: std::collections::HashSet<&str> = self
+            .worker_groups
+            .iter()
+            .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
+            .collect();
+
+        // Standalone agents
         for agent in &self.agents {
+            if grouped_ids.contains(agent.id.as_str()) {
+                continue;
+            }
             let prompt_path = self.dot_dir.join(&agent.prompt_file);
             if !prompt_path.exists() {
                 return Err(ConfigError::MissingPromptFile(prompt_path));
@@ -375,6 +562,33 @@ impl ProjectConfig {
                 .replace("{{agent_id}}", &agent.id);
             prompts.insert(agent.id.clone(), rendered);
         }
+
+        // Grouped agents — one rendered prompt per instance
+        let agent_map: HashMap<&str, &AgentEntry> =
+            self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                for agent_id in &group.agents {
+                    let a = match agent_map.get(agent_id.as_str()) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let prompt_path = self.dot_dir.join(&a.prompt_file);
+                    if !prompt_path.exists() {
+                        return Err(ConfigError::MissingPromptFile(prompt_path));
+                    }
+                    let raw = std::fs::read_to_string(&prompt_path)?;
+                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
+                    let rendered = raw
+                        .replace("{{project_root}}", &self.project_root.display().to_string())
+                        .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
+                        .replace("{{agent_id}}", &expanded_id);
+                    prompts.insert(expanded_id, rendered);
+                }
+            }
+        }
+
         Ok(prompts)
     }
 
@@ -403,9 +617,19 @@ impl ProjectConfig {
         Ok(timers)
     }
 
-    /// Derive the tmux session name for a given agent.
+    /// Derive the tmux session name for a standalone agent.
     pub fn tmux_session_for(&self, agent_id: &str) -> String {
         format!("{}-{}", self.project_name, agent_id)
+    }
+
+    /// Derive the tmux session name for a worker group instance.
+    /// When count == 1, no numeric suffix is appended.
+    pub fn group_session_for(&self, group_id: &str, instance: u32, total: u32) -> String {
+        if total == 1 {
+            format!("{}-{}", self.project_name, group_id)
+        } else {
+            format!("{}-{}-{}", self.project_name, group_id, instance)
+        }
     }
 }
 
@@ -481,6 +705,17 @@ fn sanitize_project_name(path: &Path) -> String {
         "project".to_string()
     } else {
         result
+    }
+}
+
+/// Expand an agent ID for a specific group instance.
+/// When total == 1, the ID is unchanged (no numeric suffix).
+/// When total > 1, appends `-{instance}` (e.g. `coder-1`, `coder-2`).
+pub fn expand_agent_id(agent_id: &str, instance: u32, total: u32) -> String {
+    if total == 1 {
+        agent_id.to_string()
+    } else {
+        format!("{}-{}", agent_id, instance)
     }
 }
 
@@ -582,6 +817,29 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 # IMPORTANT: Gemini agents must use --yolo or --approval-mode yolo for
 # autonomous operation. Without it, Gemini will block on action confirmations.
 # Cursor agents must use 'cursor agent' (not plain 'cursor') for CLI mode.
+#
+# Worker groups
+# =============
+# [[worker_groups]] defines named sets of agents that always launch together
+# in the same tmux session, shown side-by-side in a split pane layout.
+#
+#   id      – name of the group (used in the tmux session name)
+#   agents  – ordered list of agent IDs to place in the session
+#   layout  – "horizontal" (left|right split, default) or "vertical" (top|bottom)
+#   count   – how many parallel instances of this group to launch (default: 1)
+#
+# Example: request 2 parallel coder+tester pairs
+#
+#   [[worker_groups]]
+#   id      = "worker"
+#   agents  = ["coder", "tester"]
+#   layout  = "horizontal"
+#   count   = 2
+#
+# With count = 2 this creates sessions <project>-worker-1 and <project>-worker-2,
+# each containing a coder pane and a tester pane side-by-side.
+# Agent IDs become coder-1/coder-2/tester-1/tester-2 with matching inboxes.
+# With count = 1 (default) the session is named <project>-worker and IDs are unchanged.
 
 [[agents]]
 id = "coder"
@@ -613,6 +871,14 @@ minutes = 5
 prompt_file = "prompts/reviewer_status_check.md"
 interrupt = false
 include_agents = ["coder", "tester"]
+
+# Worker group: coder + tester always launch together side-by-side.
+# Set count = 2 to run two parallel coder+tester pairs.
+[[worker_groups]]
+id = "worker"
+agents = ["coder", "tester"]
+layout = "horizontal"
+count = 1
 "#;
 
 const DEFAULT_CODER_PROMPT: &str = r#"You are the CODER agent in a multi-agent coding system.

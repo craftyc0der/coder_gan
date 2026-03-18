@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
-use crate::config::ResolvedTimer;
+use crate::config::{ResolvedTimer, SplitDirection};
 use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
@@ -26,9 +26,25 @@ const ACTIVITY_POLL_INTERVAL_SECS: u64 = 3;
 pub struct AgentConfig {
     pub agent_id: String,
     pub cli_command: String,
+    /// The tmux session name — used for session-level operations (has-session, kill-session).
     pub tmux_session: String,
+    /// Full tmux target for inject/capture. For standalone agents this equals
+    /// `tmux_session`; for grouped agents it includes the pane index, e.g.
+    /// `myproject-worker-1:0.1`.
+    pub tmux_target: String,
     pub inbox_dir: PathBuf,
     pub allowed_write_dirs: Vec<PathBuf>,
+}
+
+/// A resolved worker group ready for the supervisor to spawn as a single
+/// tmux session with multiple panes.
+#[derive(Debug, Clone)]
+pub struct WorkerGroupConfig {
+    pub group_id: String,
+    pub session_name: String,
+    pub layout: SplitDirection,
+    /// Ordered list of agents in this group (pane 0, 1, 2, ...).
+    pub members: Vec<AgentConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +93,10 @@ impl std::fmt::Display for AgentActivity {
 pub struct AgentState {
     pub agent_id: String,
     pub tmux_session: String,
+    /// Full pane target for inject/capture. Equals `tmux_session` for standalone
+    /// agents; includes pane index for grouped agents (e.g. `session:0.1`).
+    #[serde(default)]
+    pub tmux_target: String,
     pub status: AgentStatus,
     pub restart_count: u32,
     pub last_start: DateTime<Utc>,
@@ -156,27 +176,113 @@ impl Registry {
     }
 
     /// Spawn all configured agents, injecting a startup prompt into each.
-    pub async fn spawn_all(&self, startup_prompts: &HashMap<String, String>) {
+    ///
+    /// Worker groups are spawned first as multi-pane tmux sessions; standalone
+    /// agents are then spawned each in their own session.
+    pub async fn spawn_all(
+        &self,
+        startup_prompts: &HashMap<String, String>,
+        worker_groups: &[WorkerGroupConfig],
+    ) {
         // Store prompts for later use by restart_agent
         {
             let mut prompts = self.startup_prompts.lock().await;
             *prompts = startup_prompts.clone();
         }
 
+        // Collect agent IDs that belong to a group so we skip them in standalone loop
+        let grouped_ids: std::collections::HashSet<String> = worker_groups
+            .iter()
+            .flat_map(|g| g.members.iter().map(|m| m.agent_id.clone()))
+            .collect();
+
+        // Spawn worker group sessions (each session = multiple panes)
+        for group in worker_groups {
+            self.spawn_group(group).await;
+
+            // Inject startup prompts for each group member
+            for member in &group.members {
+                if let Some(prompt) = startup_prompts.get(&member.agent_id) {
+                    sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
+                    if let Err(e) = self.injector.inject(&member.tmux_target, prompt).await {
+                        eprintln!(
+                            "[supervisor] failed to inject startup prompt for {}: {e}",
+                            member.agent_id
+                        );
+                    }
+                }
+            }
+        }
+
+        // Spawn standalone agents
         for (id, config) in self.configs.iter() {
+            if grouped_ids.contains(id) {
+                continue;
+            }
             self.spawn_agent(config).await;
 
-            // Inject startup prompt after init delay
             if let Some(prompt) = startup_prompts.get(id) {
                 sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
-                if let Err(e) = self.injector.inject(&config.tmux_session, prompt).await {
+                if let Err(e) = self.injector.inject(&config.tmux_target, prompt).await {
                     eprintln!("[supervisor] failed to inject startup prompt for {id}: {e}");
                 }
             }
         }
     }
 
-    /// Spawn a single agent.
+    /// Spawn a worker group as a single tmux session with multiple panes.
+    async fn spawn_group(&self, group: &WorkerGroupConfig) {
+        if group.members.is_empty() {
+            return;
+        }
+
+        // Kill any leftover session
+        if self.injector.has_session(&group.session_name) {
+            self.injector.kill_session(&group.session_name);
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        let cmds: Vec<&str> = group.members.iter().map(|m| m.cli_command.as_str()).collect();
+
+        match self
+            .injector
+            .spawn_group_session(&group.session_name, &cmds, &group.layout)
+        {
+            Ok(terminal_handle) => {
+                let mut agents = self.agents.lock().await;
+                for member in &group.members {
+                    let state = AgentState {
+                        agent_id: member.agent_id.clone(),
+                        tmux_session: member.tmux_session.clone(),
+                        tmux_target: member.tmux_target.clone(),
+                        status: AgentStatus::Healthy,
+                        restart_count: 0,
+                        last_start: Utc::now(),
+                        last_heartbeat: None,
+                        terminal_handle,
+                        restart_timestamps: Vec::new(),
+                        activity: AgentActivity::Unknown,
+                        last_pane_hash: None,
+                    };
+                    agents.insert(member.agent_id.clone(), state);
+                    self.logger.log(Event::AgentSpawn {
+                        agent_id: member.agent_id.clone(),
+                    });
+                    println!("[supervisor] spawned {} (group: {})", member.agent_id, group.group_id);
+                }
+                drop(agents);
+                self.persist_state().await;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[supervisor] failed to spawn group '{}': {e}",
+                    group.group_id
+                );
+            }
+        }
+    }
+
+    /// Spawn a single standalone agent in its own tmux session.
     async fn spawn_agent(&self, config: &AgentConfig) {
         // Kill leftover session if any
         if self.injector.has_session(&config.tmux_session) {
@@ -192,6 +298,7 @@ impl Registry {
                 let state = AgentState {
                     agent_id: config.agent_id.clone(),
                     tmux_session: config.tmux_session.clone(),
+                    tmux_target: config.tmux_target.clone(),
                     status: AgentStatus::Healthy,
                     restart_count: 0,
                     last_start: Utc::now(),
@@ -352,7 +459,14 @@ impl Registry {
                 let agents = self.agents.lock().await;
                 agents
                     .values()
-                    .map(|a| (a.agent_id.clone(), a.tmux_session.clone(), a.status.clone()))
+                    .map(|a| {
+                        let target = if a.tmux_target.is_empty() {
+                            a.tmux_session.clone()
+                        } else {
+                            a.tmux_target.clone()
+                        };
+                        (a.agent_id.clone(), target, a.status.clone())
+                    })
                     .collect()
             };
 
@@ -400,7 +514,14 @@ impl Registry {
                 let agents = self.agents.lock().await;
                 agents
                     .values()
-                    .map(|a| (a.agent_id.clone(), a.tmux_session.clone(), a.status.clone()))
+                    .map(|a| {
+                        let target = if a.tmux_target.is_empty() {
+                            a.tmux_session.clone()
+                        } else {
+                            a.tmux_target.clone()
+                        };
+                        (a.agent_id.clone(), target, a.status.clone())
+                    })
                     .collect()
             };
 
@@ -449,10 +570,17 @@ impl Registry {
         }
     }
 
-    /// Look up the tmux session name for a given agent_id.
+    /// Look up the tmux target (pane-specific if grouped) for a given agent_id.
+    /// Used by the timer loop for injection.
     pub async fn session_for(&self, agent_id: &str) -> Option<String> {
         let agents = self.agents.lock().await;
-        agents.get(agent_id).map(|a| a.tmux_session.clone())
+        agents.get(agent_id).map(|a| {
+            if a.tmux_target.is_empty() {
+                a.tmux_session.clone()
+            } else {
+                a.tmux_target.clone()
+            }
+        })
     }
 
     /// Restart an agent with a fresh context: respawn the pane process
@@ -490,7 +618,7 @@ impl Registry {
         let prompts = self.startup_prompts.lock().await;
         if let Some(prompt) = prompts.get(agent_id) {
             sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
-            if let Err(e) = self.injector.inject(&config.tmux_session, prompt).await {
+            if let Err(e) = self.injector.inject(&config.tmux_target, prompt).await {
                 eprintln!("[supervisor] failed to inject startup prompt for {agent_id}: {e}");
             }
         }
