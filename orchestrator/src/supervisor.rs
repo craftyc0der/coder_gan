@@ -732,6 +732,10 @@ impl Registry {
                             // Fire alert
                             print_attention_alert(id, session, pattern);
                             self.injector.set_pane_attention_style(target, session);
+                            crate::injector::send_os_notification(
+                                "Agent needs input",
+                                &format!("{} — {}", id, pattern),
+                            );
                             state.active = true;
                             state.last_alerted = Some(Utc::now());
                             self.logger.log(Event::AgentNeedsAttention {
@@ -799,6 +803,10 @@ impl Registry {
         let _ = std::io::stderr().write_all(banner.as_bytes());
 
         self.injector.set_pane_attention_style(&target, &session);
+        crate::injector::send_os_notification(
+            "Agent requesting attention",
+            &format!("{} — {}", agent_id, summary),
+        );
         self.logger.log(Event::AgentNeedsAttention {
             agent_id: agent_id.to_string(),
             pattern: summary,

@@ -427,6 +427,31 @@ pub fn close_terminal_handle(handle: u32) {
     }
 }
 
+/// Send a native OS desktop notification if a supported notification tool is available.
+///
+/// - macOS  : uses `osascript` (always present)
+/// - Linux  : tries `notify-send` (libnotify); silently skips if not installed
+///
+/// Failures are ignored — this is a best-effort side channel on top of the
+/// existing bell + tmux colour shift.
+pub fn send_os_notification(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification {:?} with title {:?}",
+            body, title
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).status();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .args(["--urgency=critical", "--app-name=orchestrator", title, body])
+            .status();
+    }
+}
+
 /// Set a visual "needs attention" style on a tmux pane to alert the operator.
 ///
 /// Applies three layers of visibility:
