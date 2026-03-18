@@ -21,6 +21,112 @@ const RESTART_WINDOW_SECS: i64 = 120; // 2 minutes
 const AGENT_INIT_DELAY_SECS: u64 = 5;
 const TRANSCRIPT_INTERVAL_SECS: u64 = 30;
 const ACTIVITY_POLL_INTERVAL_SECS: u64 = 3;
+const ATTENTION_POLL_INTERVAL_SECS: u64 = 3;
+const ATTENTION_DEBOUNCE_SECS: i64 = 30;
+/// Number of trailing lines to scan for interactive prompts. Prompts always
+/// appear at the bottom of the terminal, so scanning only the tail reduces
+/// false positives from code/output that happens to contain prompt-like text.
+const ATTENTION_SCAN_LINES: usize = 8;
+
+// ---------------------------------------------------------------------------
+// Attention detection
+// ---------------------------------------------------------------------------
+
+/// Returns the set of terminal patterns that indicate the given CLI tool is
+/// waiting for keyboard input from the user.
+///
+/// Patterns are matched against the last [`ATTENTION_SCAN_LINES`] lines of
+/// the pane content so that prompt text embedded in earlier output is ignored.
+fn attention_patterns(cli_command: &str) -> &'static [&'static str] {
+    match cli_command.split_whitespace().next().unwrap_or("") {
+        "claude" => &[
+            "Do you want to",
+            "Allow this",
+            "Would you like to",
+            "[y/N]",
+            "[Y/n]",
+            "(y/n)",
+            "Are you sure",
+            "Press Enter",
+            "Bypass permissions",
+        ],
+        "codex" => &[
+            "Allow command?",
+            "(y/a/x/e/n)",
+            "Edit or give feedback",
+            "Approve this",
+        ],
+        "copilot" => &[
+            "> Yes",
+            "> No",
+            "Allow for the rest",
+            "tell Copilot what to do",
+        ],
+        "cursor" => &[
+            "Skip and Continue",
+        ],
+        "gemini" => &[
+            "(y/n/always)",
+            "Trust and execute",
+        ],
+        _ => &[
+            "[y/N]",
+            "[Y/n]",
+            "(y/n)",
+            "Are you sure?",
+            "Press Enter to continue",
+            "Do you want to proceed",
+        ],
+    }
+}
+
+/// Scan the tail of a captured pane for any known attention pattern.
+/// Returns the first matched pattern string, or `None` if none found.
+fn detect_attention_pattern(content: &str, cli_command: &str) -> Option<&'static str> {
+    let tail: String = content
+        .lines()
+        .rev()
+        .take(ATTENTION_SCAN_LINES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for pattern in attention_patterns(cli_command) {
+        if tail.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    None
+}
+
+/// Print a high-visibility attention banner to the orchestrator terminal
+/// and ring the terminal bell.
+fn print_attention_alert(agent_id: &str, tmux_session: &str, pattern: &str) {
+    use std::io::Write;
+    let banner = format!(
+        "\x07\n\
+         ╔══════════════════════════════════════════════╗\n\
+         ║  ⚠  AGENT NEEDS INPUT                       ║\n\
+         ║  agent:   {:<35}║\n\
+         ║  session: {:<35}║\n\
+         ║  matched: {:<35}║\n\
+         ╚══════════════════════════════════════════════╝\n",
+        agent_id, tmux_session, pattern,
+    );
+    let _ = std::io::stderr().write_all(banner.as_bytes());
+}
+
+/// Per-agent state tracked by the attention loop (not persisted to state.json).
+struct AgentAttentionState {
+    /// Whether attention visuals are currently applied.
+    active: bool,
+    /// When we last fired an alert (for debounce).
+    last_alerted: Option<DateTime<Utc>>,
+    /// Pane hash from the previous poll cycle (to detect "stuck" state).
+    prev_hash: Option<u64>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -547,6 +653,157 @@ impl Registry {
                 }
             }
         }
+    }
+
+    /// Attention detection loop. Polls each agent's pane every few seconds and
+    /// fires a visual + audible alert when an interactive prompt is detected.
+    ///
+    /// An alert fires when:
+    ///   1. The pane content matches a known "waiting for input" pattern for
+    ///      the agent's CLI tool, AND
+    ///   2. The pane hash is unchanged from the previous poll (agent is stuck,
+    ///      not just transiently printing prompt-like text), AND
+    ///   3. The agent hasn't been alerted within the debounce window.
+    ///
+    /// When the pane content changes (agent unblocked), the visual is cleared.
+    pub async fn attention_loop(self) {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut attn_states: HashMap<String, AgentAttentionState> = HashMap::new();
+
+        loop {
+            sleep(Duration::from_secs(ATTENTION_POLL_INTERVAL_SECS)).await;
+
+            // Collect (agent_id, tmux_target, tmux_session, cli_command, status) snapshots
+            let snapshots: Vec<(String, String, String, String, AgentStatus)> = {
+                let agents = self.agents.lock().await;
+                agents
+                    .values()
+                    .filter_map(|a| {
+                        let config = self.configs.get(&a.agent_id)?;
+                        let target = if a.tmux_target.is_empty() {
+                            a.tmux_session.clone()
+                        } else {
+                            a.tmux_target.clone()
+                        };
+                        Some((
+                            a.agent_id.clone(),
+                            target,
+                            a.tmux_session.clone(),
+                            config.cli_command.clone(),
+                            a.status.clone(),
+                        ))
+                    })
+                    .collect()
+            };
+
+            for (id, target, session, cli_cmd, status) in &snapshots {
+                if *status == AgentStatus::Dead {
+                    continue;
+                }
+
+                let content = match self.injector.capture(target) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                let mut hasher = DefaultHasher::new();
+                content.hash(&mut hasher);
+                let current_hash = hasher.finish();
+
+                let state = attn_states.entry(id.clone()).or_insert(AgentAttentionState {
+                    active: false,
+                    last_alerted: None,
+                    prev_hash: None,
+                });
+
+                let hash_stable = state.prev_hash == Some(current_hash);
+                state.prev_hash = Some(current_hash);
+
+                if hash_stable {
+                    // Pane is stuck — check for attention pattern
+                    if let Some(pattern) = detect_attention_pattern(&content, cli_cmd) {
+                        let debounce_ok = state.last_alerted.map_or(true, |t| {
+                            (Utc::now() - t).num_seconds() >= ATTENTION_DEBOUNCE_SECS
+                        });
+
+                        if debounce_ok {
+                            // Fire alert
+                            print_attention_alert(id, session, pattern);
+                            self.injector.set_pane_attention_style(target, session);
+                            state.active = true;
+                            state.last_alerted = Some(Utc::now());
+                            self.logger.log(Event::AgentNeedsAttention {
+                                agent_id: id.clone(),
+                                pattern: pattern.to_string(),
+                                source: "auto-detected".to_string(),
+                            });
+                        }
+                    }
+                } else if state.active {
+                    // Pane changed — agent is no longer blocked; clear visuals
+                    self.injector.clear_pane_attention_style(target, session);
+                    state.active = false;
+                    self.logger.log(Event::AgentAttentionResolved {
+                        agent_id: id.clone(),
+                    });
+                    eprintln!("[attention] {} unblocked — cleared alert", id);
+                }
+            }
+        }
+    }
+
+    /// Fire an operator alert for an agent-initiated _ATTENTION request.
+    /// Called by the message watcher when it sees a _ATTENTION topic message.
+    pub async fn fire_attention_alert(
+        &self,
+        agent_id: &str,
+        message_content: &str,
+    ) {
+        let (target, session) = {
+            let agents = self.agents.lock().await;
+            match agents.get(agent_id) {
+                Some(a) => {
+                    let tgt = if a.tmux_target.is_empty() {
+                        a.tmux_session.clone()
+                    } else {
+                        a.tmux_target.clone()
+                    };
+                    (tgt, a.tmux_session.clone())
+                }
+                None => return,
+            }
+        };
+
+        // Trim message for the banner (first line, max 60 chars)
+        let summary: String = message_content
+            .lines()
+            .next()
+            .unwrap_or("(no message)")
+            .chars()
+            .take(60)
+            .collect();
+
+        use std::io::Write;
+        let banner = format!(
+            "\x07\n\
+             ╔══════════════════════════════════════════════╗\n\
+             ║  ⚠  AGENT REQUESTING ATTENTION              ║\n\
+             ║  agent:   {:<35}║\n\
+             ║  session: {:<35}║\n\
+             ║  message: {:<35}║\n\
+             ╚══════════════════════════════════════════════╝\n",
+            agent_id, session, summary,
+        );
+        let _ = std::io::stderr().write_all(banner.as_bytes());
+
+        self.injector.set_pane_attention_style(&target, &session);
+        self.logger.log(Event::AgentNeedsAttention {
+            agent_id: agent_id.to_string(),
+            pattern: summary,
+            source: "agent-initiated".to_string(),
+        });
     }
 
     /// Kill all agent tmux sessions and close their terminal windows.

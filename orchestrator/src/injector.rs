@@ -427,6 +427,51 @@ pub fn close_terminal_handle(handle: u32) {
     }
 }
 
+/// Set a visual "needs attention" style on a tmux pane to alert the operator.
+///
+/// Applies three layers of visibility:
+/// 1. Pane background — dark red tint on the specific pane content area
+/// 2. Status bar      — red status bar on the session (visible in tab/title)
+/// 3. Window rename   — "[⚠ INPUT NEEDED]" in the window title
+///
+/// Silently ignores failures; this is best-effort visual alerting.
+pub fn set_pane_attention_style(target: &str, session: &str) {
+    // 1. Dark red pane background (colour52 = dark red)
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", target, "-P", "bg=colour52"])
+        .status();
+
+    // 2. Red status bar on the session
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "status-style", "bg=red,fg=white,bold"])
+        .status();
+
+    // 3. Window title
+    let _ = Command::new("tmux")
+        .args(["rename-window", "-t", &format!("{}:0", session), "[⚠ INPUT NEEDED]"])
+        .status();
+}
+
+/// Clear the "needs attention" visual style and restore session defaults.
+///
+/// Silently ignores failures.
+pub fn clear_pane_attention_style(target: &str, session: &str) {
+    // 1. Clear pane background
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", target, "-P", ""])
+        .status();
+
+    // 2. Reset status bar to session default
+    let _ = Command::new("tmux")
+        .args(["set-option", "-u", "-t", session, "status-style"])
+        .status();
+
+    // 3. Re-enable automatic window renaming
+    let _ = Command::new("tmux")
+        .args(["set-window-option", "-t", &format!("{}:0", session), "automatic-rename", "on"])
+        .status();
+}
+
 /// Kill a tmux session.
 pub fn kill_session(session: &str) {
     let _ = Command::new("tmux")
@@ -675,6 +720,10 @@ pub trait InjectorOps: Send + Sync {
     fn capture(&self, session: &str) -> Result<String, InjectionError>;
     /// Send a bare `send-keys` to the tmux session (e.g. for interrupt keys).
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError>;
+    /// Apply the "needs attention" visual style to a pane (best-effort, no error).
+    fn set_pane_attention_style(&self, target: &str, session: &str);
+    /// Clear the "needs attention" visual style and restore defaults (best-effort).
+    fn clear_pane_attention_style(&self, target: &str, session: &str);
     /// Interrupt the agent, wait for settle, then inject text.
     fn inject_interrupt<'a>(
         &'a self,
@@ -720,6 +769,12 @@ impl InjectorOps for RealInjector {
     }
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError> {
         send_keys(session, keys)
+    }
+    fn set_pane_attention_style(&self, target: &str, session: &str) {
+        set_pane_attention_style(target, session);
+    }
+    fn clear_pane_attention_style(&self, target: &str, session: &str) {
+        clear_pane_attention_style(target, session);
     }
     fn inject_interrupt<'a>(
         &'a self,

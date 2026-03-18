@@ -334,7 +334,9 @@ impl MessageWatcher {
             || meta.topic.eq_ignore_ascii_case("_interrupt")
             || meta.topic.ends_with("_INTERRUPT")
             || meta.topic.eq_ignore_ascii_case("_timer")
-            || meta.topic.ends_with("_TIMER");
+            || meta.topic.ends_with("_TIMER")
+            || meta.topic.eq_ignore_ascii_case("_attention")
+            || meta.topic.ends_with("_ATTENTION");
 
         if !is_special {
             if let Ok(bytes) = std::fs::read(&meta.path) {
@@ -376,6 +378,22 @@ impl MessageWatcher {
                         std::fs::rename(&meta.path, self.dead_letter_dir.join(&meta.filename));
                 }
             }
+            return;
+        }
+
+        // Handle _ATTENTION topic: agent is requesting operator attention.
+        // Read the message, fire a bell + visual alert, then move to processed/.
+        // The agent continues running — this is a non-blocking signal to the operator.
+        if meta.topic.eq_ignore_ascii_case("_attention") {
+            println!(
+                "[watcher] attention requested by '{}' (sender: '{}')",
+                meta.recipient, meta.sender
+            );
+            let content = std::fs::read_to_string(&meta.path).unwrap_or_default();
+            self.registry
+                .fire_attention_alert(&meta.recipient, &content)
+                .await;
+            let _ = std::fs::rename(&meta.path, self.processed_dir.join(&meta.filename));
             return;
         }
 

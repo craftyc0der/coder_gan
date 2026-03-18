@@ -299,6 +299,12 @@ async fn run_orchestrator(config: ProjectConfig) {
         activity_registry.activity_loop().await;
     });
 
+    // Start the attention detection loop (interactive prompt scanning every 3s)
+    let attention_registry = registry.clone();
+    let attention_handle = tokio::spawn(async move {
+        attention_registry.attention_loop().await;
+    });
+
     // Start the timer loop for recurring prompt injections
     let timer_handle = match config.resolved_timers() {
         Ok(timers) if !timers.is_empty() => {
@@ -339,6 +345,7 @@ async fn run_orchestrator(config: ProjectConfig) {
     health_handle.abort();
     transcript_handle.abort();
     activity_handle.abort();
+    attention_handle.abort();
     if let Some(h) = timer_handle {
         h.abort();
     }
