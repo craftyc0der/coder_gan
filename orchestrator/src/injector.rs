@@ -3,6 +3,8 @@ use std::pin::Pin;
 use std::process::Command;
 use tokio::time::{sleep, Duration};
 
+use crate::config::SplitDirection;
+
 const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 1;
 
@@ -129,6 +131,84 @@ pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionE
             step: "set-option set-titles-string".into(),
             detail: format!("exited with {title_string_status}"),
         });
+    }
+
+    Ok(open_terminal_window(session))
+}
+
+/// Spawn a detached tmux session with multiple panes for a worker group.
+///
+/// The first command in `cmds` creates the initial pane (window 0, pane 0).
+/// Each subsequent command is added via `split-window` using the specified
+/// layout direction.  Returns the terminal window handle (same semantics as
+/// `spawn_session`).
+pub fn spawn_group_session(
+    session: &str,
+    cmds: &[&str],
+    layout: &SplitDirection,
+) -> Result<Option<u32>, InjectionError> {
+    if cmds.is_empty() {
+        return Err(InjectionError::TmuxCommand {
+            step: "spawn_group_session".into(),
+            detail: "no commands provided".into(),
+        });
+    }
+
+    // Create the session with the first command
+    let status = Command::new("tmux")
+        .args(["new-session", "-d", "-s", session, "-x", "220", "-y", "50", cmds[0]])
+        .status()
+        .map_err(|e| InjectionError::TmuxCommand {
+            step: "new-session".into(),
+            detail: e.to_string(),
+        })?;
+    if !status.success() {
+        return Err(InjectionError::TmuxCommand {
+            step: "new-session".into(),
+            detail: format!("exited with {status}"),
+        });
+    }
+
+    // Add subsequent panes via split-window
+    let split_flag = match layout {
+        SplitDirection::Horizontal => "-h", // left|right
+        SplitDirection::Vertical => "-v",   // top|bottom
+    };
+    for cmd in cmds.iter().skip(1) {
+        let status = Command::new("tmux")
+            .args(["split-window", split_flag, "-t", session, cmd])
+            .status()
+            .map_err(|e| InjectionError::TmuxCommand {
+                step: "split-window".into(),
+                detail: e.to_string(),
+            })?;
+        if !status.success() {
+            return Err(InjectionError::TmuxCommand {
+                step: "split-window".into(),
+                detail: format!("exited with {status}"),
+            });
+        }
+    }
+
+    // Balance pane sizes
+    let layout_name = match layout {
+        SplitDirection::Horizontal => "even-horizontal",
+        SplitDirection::Vertical => "even-vertical",
+    };
+    let _ = Command::new("tmux")
+        .args(["select-layout", "-t", session, layout_name])
+        .status();
+
+    // Apply session options (same as spawn_session)
+    for (opt, val) in &[
+        ("mouse", "on"),
+        ("history-limit", "100000"),
+        ("set-titles", "on"),
+        ("set-titles-string", "#S"),
+    ] {
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", session, opt, val])
+            .status();
     }
 
     Ok(open_terminal_window(session))
@@ -345,6 +425,88 @@ pub fn close_terminal_handle(handle: u32) {
             }
         }
     }
+}
+
+/// Send a native OS desktop notification if a supported notification tool is available.
+///
+/// - macOS  : uses `osascript` (always present)
+/// - Linux  : tries `notify-send` (libnotify); silently skips if not installed
+///
+/// Failures are ignored — this is a best-effort side channel on top of the
+/// existing tmux colour shift.
+pub fn send_os_notification(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification {:?} with title {:?}",
+            body, title
+        );
+        let _ = Command::new("osascript").args(["-e", &script]).status();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("notify-send")
+            .args(["--urgency=critical", "--app-name=orchestrator", title, body])
+            .status();
+    }
+}
+
+/// Set a visual "needs attention" style on a tmux pane to alert the operator.
+///
+/// Applies three layers of visibility:
+/// 1. Pane background — dark red tint on the specific pane content area
+/// 2. Status bar      — red status bar on the session (visible in tab/title)
+/// 3. Window rename   — "[⚠ INPUT NEEDED]" in the window title
+///
+/// Silently ignores failures; this is best-effort visual alerting.
+pub fn set_pane_attention_style(target: &str, session: &str) {
+    // 1. Dark red pane background (colour52 = dark red)
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", target, "-P", "bg=colour52"])
+        .status();
+
+    // 2. Red status bar on the session
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session, "status-style", "bg=red,fg=white,bold"])
+        .status();
+
+    // 3. Window title
+    let _ = Command::new("tmux")
+        .args(["rename-window", "-t", &format!("{}:0", session), "[⚠ INPUT NEEDED]"])
+        .status();
+}
+
+/// Clear the "needs attention" visual style and restore session defaults.
+///
+/// Silently ignores failures.
+pub fn clear_pane_attention_style(target: &str, session: &str) {
+    // 1. Clear pane background
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", target, "-P", ""])
+        .status();
+
+    // 2. Reset status bar to session default
+    let _ = Command::new("tmux")
+        .args(["set-option", "-u", "-t", session, "status-style"])
+        .status();
+
+    // 3. Re-enable automatic window renaming
+    let _ = Command::new("tmux")
+        .args(["set-window-option", "-t", &format!("{}:0", session), "automatic-rename", "on"])
+        .status();
+}
+
+/// Check whether a specific tmux pane is still alive (its process has not exited).
+///
+/// Uses the `#{pane_dead}` format variable: "0" = alive, "1" = dead.
+/// Returns `false` if the target doesn't exist or the command fails.
+pub fn is_pane_alive(target: &str) -> bool {
+    Command::new("tmux")
+        .args(["display-message", "-t", target, "-p", "#{pane_dead}"])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
 }
 
 /// Kill a tmux session.
@@ -574,6 +736,15 @@ pub trait InjectorOps: Send + Sync {
     /// Spawn a tmux session. Returns the terminal handle if one was
     /// opened, or `None` (e.g. in tests or headless mode).
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError>;
+    /// Spawn a tmux session with multiple panes for a worker group.
+    /// The first command in `cmds` gets pane 0; subsequent commands are split
+    /// in the given direction.  Returns the terminal window handle.
+    fn spawn_group_session(
+        &self,
+        session: &str,
+        cmds: &[&str],
+        layout: &SplitDirection,
+    ) -> Result<Option<u32>, InjectionError>;
     /// Kill the running process inside the pane and restart it with a new
     /// command, keeping the tmux session (and any attached terminal) alive.
     fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError>;
@@ -586,6 +757,12 @@ pub trait InjectorOps: Send + Sync {
     fn capture(&self, session: &str) -> Result<String, InjectionError>;
     /// Send a bare `send-keys` to the tmux session (e.g. for interrupt keys).
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError>;
+    /// Check whether a specific pane is still alive within a tmux session.
+    fn is_pane_alive(&self, target: &str) -> bool;
+    /// Apply the "needs attention" visual style to a pane (best-effort, no error).
+    fn set_pane_attention_style(&self, target: &str, session: &str);
+    /// Clear the "needs attention" visual style and restore defaults (best-effort).
+    fn clear_pane_attention_style(&self, target: &str, session: &str);
     /// Interrupt the agent, wait for settle, then inject text.
     fn inject_interrupt<'a>(
         &'a self,
@@ -608,6 +785,14 @@ impl InjectorOps for RealInjector {
     fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
         spawn_session(session, cmd)
     }
+    fn spawn_group_session(
+        &self,
+        session: &str,
+        cmds: &[&str],
+        layout: &SplitDirection,
+    ) -> Result<Option<u32>, InjectionError> {
+        spawn_group_session(session, cmds, layout)
+    }
     fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError> {
         respawn_pane(session, cmd)
     }
@@ -623,6 +808,15 @@ impl InjectorOps for RealInjector {
     }
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError> {
         send_keys(session, keys)
+    }
+    fn is_pane_alive(&self, target: &str) -> bool {
+        is_pane_alive(target)
+    }
+    fn set_pane_attention_style(&self, target: &str, session: &str) {
+        set_pane_attention_style(target, session);
+    }
+    fn clear_pane_attention_style(&self, target: &str, session: &str) {
+        clear_pane_attention_style(target, session);
     }
     fn inject_interrupt<'a>(
         &'a self,

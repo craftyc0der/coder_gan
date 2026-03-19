@@ -140,6 +140,20 @@ pub enum Event {
         prompt_file: String,
     },
 
+    #[serde(rename = "agent_needs_attention")]
+    AgentNeedsAttention {
+        agent_id: String,
+        /// The matched pattern that triggered this alert.
+        pattern: String,
+        /// Whether this was agent-initiated (via _ATTENTION message) or auto-detected.
+        source: String,
+    },
+
+    #[serde(rename = "agent_attention_resolved")]
+    AgentAttentionResolved {
+        agent_id: String,
+    },
+
     // Slack agent events
     #[cfg(feature = "slack")]
     #[serde(rename = "slack_connected")]

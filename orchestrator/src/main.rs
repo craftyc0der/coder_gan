@@ -171,19 +171,43 @@ async fn run_orchestrator(config: ProjectConfig) {
         config.dot_dir.join("agents.toml").display()
     );
     println!("Event log: {}", logger.path().display());
-    println!(
-        "Agents:    {}",
-        config
-            .agents
-            .iter()
-            .map(|a| a.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+
+    // Print worker groups summary
+    if !config.worker_groups.is_empty() {
+        for group in &config.worker_groups {
+            println!(
+                "Group:     {} ({}) × {} — [{}]",
+                group.id,
+                match group.layout {
+                    orchestrator::config::SplitDirection::Horizontal => "horizontal",
+                    orchestrator::config::SplitDirection::Vertical => "vertical",
+                },
+                group.count,
+                group.agents.join(", ")
+            );
+        }
+    }
+
+    // Print standalone agents
+    let grouped_ids: std::collections::HashSet<&str> = config
+        .worker_groups
+        .iter()
+        .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
+        .collect();
+    let standalone: Vec<&str> = config
+        .agents
+        .iter()
+        .filter(|a| !grouped_ids.contains(a.id.as_str()))
+        .map(|a| a.id.as_str())
+        .collect();
+    if !standalone.is_empty() {
+        println!("Agents:    {}", standalone.join(", "));
+    }
     println!();
 
     // Build agent configs and registry
     let agent_cfgs = config.agent_configs();
+    let group_cfgs = config.worker_group_configs();
     let registry = Registry::new(
         agent_cfgs,
         config.state_path.clone(),
@@ -202,7 +226,7 @@ async fn run_orchestrator(config: ProjectConfig) {
 
     // Spawn all agents with startup prompts
     println!("Spawning agents...");
-    registry.spawn_all(&prompts).await;
+    registry.spawn_all(&prompts, &group_cfgs).await;
     println!("All agents spawned.\n");
 
     // Spawn Slack WebSocket watchers for slack-type agents
@@ -275,6 +299,12 @@ async fn run_orchestrator(config: ProjectConfig) {
         activity_registry.activity_loop().await;
     });
 
+    // Start the attention detection loop (interactive prompt scanning every 3s)
+    let attention_registry = registry.clone();
+    let attention_handle = tokio::spawn(async move {
+        attention_registry.attention_loop().await;
+    });
+
     // Start the timer loop for recurring prompt injections
     let timer_handle = match config.resolved_timers() {
         Ok(timers) if !timers.is_empty() => {
@@ -315,6 +345,7 @@ async fn run_orchestrator(config: ProjectConfig) {
     health_handle.abort();
     transcript_handle.abort();
     activity_handle.abort();
+    attention_handle.abort();
     if let Some(h) = timer_handle {
         h.abort();
     }

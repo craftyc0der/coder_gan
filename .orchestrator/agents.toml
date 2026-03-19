@@ -21,6 +21,14 @@ command = "copilot"
 prompt_file = "prompts/reviewer.md"
 allowed_write_dirs = ["/"]
 
+# Worker group: coder + tester always launch together side-by-side.
+# Set count = 2 to run two parallel coder+tester pairs.
+[[worker_groups]]
+id = "worker"
+agents = ["coder", "tester"]
+layout = "horizontal"
+count = 2
+
 # Re-inject the full reviewer prompt every 30 minutes to prevent context drift
 [[agents.timers]]
 minutes = 30
