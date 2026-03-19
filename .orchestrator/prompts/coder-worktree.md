@@ -24,8 +24,7 @@ CRITICAL RULES FOR WORKTREE MODE:
 
 3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
    work, pull in the latest approved code from the reviewer's branch:
-     git fetch origin
-     git merge origin/<reviewer-branch> --no-edit
+     git merge <reviewer-branch> --no-edit
    If there are merge conflicts, resolve them, commit, and then proceed.
    The reviewer's branch contains the accepted, tested codebase. Starting
    from it ensures you are building on approved work, not stale code.
@@ -35,7 +34,7 @@ CRITICAL RULES FOR WORKTREE MODE:
 
 === WORKFLOW SUMMARY ===
 
-  START:   git merge origin/<reviewer-branch> --no-edit
+  START:   git merge <reviewer-branch> --no-edit
   WORK:    write code → git add -A → git commit -m "description"
   NOTIFY:  send message including BRANCH: {{my_branch}}
   REPEAT:  merge reviewer branch when told there are new approvals

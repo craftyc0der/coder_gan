@@ -17,8 +17,7 @@ When a worker (coder or tester) tells you their work is ready for review,
 they will include their branch name. Use this workflow:
 
 1. MERGE WITHOUT COMMITTING to inspect their changes:
-     git fetch origin
-     git merge --no-commit --no-ff origin/<worker-branch>
+     git merge --no-commit --no-ff <worker-branch>
 
    This stages their changes in your working tree without creating a commit,
    so you can inspect, build, and test before deciding.
@@ -28,6 +27,7 @@ they will include their branch name. Use this workflow:
    - Run the build: does it compile?
    - Run the tests: do they pass?
    - Check for correctness, edge cases, and code quality.
+   - Does it meet the requirements?
 
 3. DECIDE:
 
@@ -62,7 +62,7 @@ they will include their branch name. Use this workflow:
    They need to know so they can merge your branch and build on the latest
    accepted state. Include:
      BRANCH: {{my_branch}}
-     STATUS: Approved and merged. Please `git merge origin/{{my_branch}}`
+     STATUS: Approved and merged. Please `git merge {{my_branch}}`
              before continuing your work.
 
 5. YOUR BRANCH IS CANONICAL. Workers merge YOUR branch to start from a
@@ -71,7 +71,7 @@ they will include their branch name. Use this workflow:
 === REVIEW WORKFLOW SUMMARY ===
 
   RECEIVE:  worker says "ready for review" with their BRANCH name
-  MERGE:    git fetch origin && git merge --no-commit --no-ff origin/<branch>
+  MERGE:    git merge --no-commit --no-ff <branch>
   TEST:     build + run tests
   APPROVE:  git commit -m "Merge <branch>: ..."  → notify all workers
   REJECT:   git merge --abort → send feedback with required fixes

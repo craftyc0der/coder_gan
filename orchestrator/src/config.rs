@@ -1481,8 +1481,7 @@ CRITICAL RULES FOR WORKTREE MODE:
 
 3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
    work, pull in the latest approved code from the reviewer's branch:
-     git fetch origin
-     git merge origin/<reviewer-branch> --no-edit
+     git merge <reviewer-branch> --no-edit
    If there are merge conflicts, resolve them, commit, and then proceed.
    The reviewer's branch contains the accepted, tested codebase. Starting
    from it ensures you are building on approved work, not stale code.
@@ -1492,7 +1491,7 @@ CRITICAL RULES FOR WORKTREE MODE:
 
 === WORKFLOW SUMMARY ===
 
-  START:   git merge origin/<reviewer-branch> --no-edit
+  START:   git merge <reviewer-branch> --no-edit
   WORK:    write code → git add -A → git commit -m "description"
   NOTIFY:  send message including BRANCH: {{my_branch}}
   REPEAT:  merge reviewer branch when told there are new approvals
@@ -1501,7 +1500,7 @@ CRITICAL RULES FOR WORKTREE MODE:
 const DEFAULT_TESTER_WORKTREE_PROMPT: &str = r#"
 === WORKTREE MODE — GIT WORKFLOW ===
 
-You are working in a git worktree with your own dedicated branch.
+You are working in a git worktree shared with your coder partner.
 
 YOUR BRANCH: {{my_branch}}
 YOUR WORKTREE: {{worktree_root}}
@@ -1511,40 +1510,24 @@ Other agents and their branches:
 
 CRITICAL RULES FOR WORKTREE MODE:
 
-1. COMMIT YOUR WORK. You are on your own branch. You MUST `git add` and
-   `git commit` your test files after writing or updating them. Uncommitted
-   tests are invisible to the reviewer.
+1. COMMIT YOUR WORK. You MUST `git add` and `git commit` your test files
+   after writing or updating them. Uncommitted tests are invisible to the
+   reviewer.
 
 2. INCLUDE YOUR BRANCH IN EVERY MESSAGE. When you send a message to any
    other agent, always include the line:
      BRANCH: {{my_branch}}
    This tells the recipient where to find your tests.
 
-3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
-   work, pull in the latest approved code from the reviewer's branch:
-     git fetch origin
-     git merge origin/<reviewer-branch> --no-edit
-   The reviewer's branch has the accepted implementation code. You need it
-   so your tests can compile and run against the actual source. If there
-   are merge conflicts, resolve them and commit before proceeding.
-
-4. MERGE THE CODER'S BRANCH WHEN TESTING. When the coder sends you a
-   message asking you to test their work, they will include their branch
-   name. Merge their branch to get their implementation code:
-     git fetch origin
-     git merge origin/<coder-branch> --no-edit
-   Then write and run your tests against it.
-
-5. WHEN TO MERGE AGAIN. Any time the reviewer tells you there are new
-   approvals, merge the reviewer's branch before continuing.
+3. YOU DO NOT NEED TO MERGE. Your coder partner shares the same branch
+   and worktree. Their implementation code is already available to you.
+   The coder is responsible for merging the reviewer's approved code into
+   your shared branch when needed.
 
 === WORKFLOW SUMMARY ===
 
-  START:   git merge origin/<reviewer-branch> --no-edit
-  TEST:    git merge origin/<coder-branch> --no-edit
-           write tests → run tests → git add -A → git commit -m "description"
+  WORK:    write tests → run tests → git add -A → git commit -m "description"
   NOTIFY:  send message including BRANCH: {{my_branch}}
-  REPEAT:  merge reviewer branch when told there are new approvals
 "#;
 
 const DEFAULT_REVIEWER_WORKTREE_PROMPT: &str = r#"
@@ -1566,8 +1549,7 @@ When a worker (coder or tester) tells you their work is ready for review,
 they will include their branch name. Use this workflow:
 
 1. MERGE WITHOUT COMMITTING to inspect their changes:
-     git fetch origin
-     git merge --no-commit --no-ff origin/<worker-branch>
+     git merge --no-commit --no-ff <worker-branch>
 
    This stages their changes in your working tree without creating a commit,
    so you can inspect, build, and test before deciding.
@@ -1611,7 +1593,7 @@ they will include their branch name. Use this workflow:
    They need to know so they can merge your branch and build on the latest
    accepted state. Include:
      BRANCH: {{my_branch}}
-     STATUS: Approved and merged. Please `git merge origin/{{my_branch}}`
+     STATUS: Approved and merged. Please `git merge {{my_branch}}`
              before continuing your work.
 
 5. YOUR BRANCH IS CANONICAL. Workers merge YOUR branch to start from a
@@ -1620,7 +1602,7 @@ they will include their branch name. Use this workflow:
 === REVIEW WORKFLOW SUMMARY ===
 
   RECEIVE:  worker says "ready for review" with their BRANCH name
-  MERGE:    git fetch origin && git merge --no-commit --no-ff origin/<branch>
+  MERGE:    git merge --no-commit --no-ff <branch>
   TEST:     build + run tests
   APPROVE:  git commit -m "Merge <branch>: ..."  → notify all workers
   REJECT:   git merge --abort → send feedback with required fixes
