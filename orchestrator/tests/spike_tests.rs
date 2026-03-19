@@ -142,6 +142,18 @@ impl InjectorOps for MockInjector {
         // Delegate to normal inject
         self.inject(session, text)
     }
+
+    fn spawn_group_session(
+        &self,
+        _session: &str,
+        _cmds: &[&str],
+        _layout: &orchestrator::config::SplitDirection,
+    ) -> Result<Option<u32>, InjectionError> {
+        Ok(None)
+    }
+
+    fn set_pane_attention_style(&self, _target: &str, _session: &str) {}
+    fn clear_pane_attention_style(&self, _target: &str, _session: &str) {}
 }
 
 fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
@@ -161,6 +173,7 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
         state_path: dot.join("runtime/logs/state.json"),
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
         agents,
+        worker_groups: vec![],
     }
 }
 

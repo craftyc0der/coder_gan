@@ -147,6 +147,21 @@ impl InjectorOps for MockInjector {
     ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
         self.inject(session, text)
     }
+
+    fn spawn_group_session(
+        &self,
+        session: &str,
+        cmds: &[&str],
+        _layout: &orchestrator::config::SplitDirection,
+    ) -> Result<Option<u32>, InjectionError> {
+        for cmd in cmds {
+            self.spawned.lock().unwrap().push((session.to_string(), cmd.to_string()));
+        }
+        Ok(None)
+    }
+
+    fn set_pane_attention_style(&self, _target: &str, _session: &str) {}
+    fn clear_pane_attention_style(&self, _target: &str, _session: &str) {}
 }
 
 fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
@@ -157,6 +172,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             agent_id: "coder".into(),
             cli_command: "echo".into(),
             tmux_session: "testproject-coder".into(),
+            tmux_target: "testproject-coder".into(),
             inbox_dir: messages.join("to_coder"),
             allowed_write_dirs: vec![root.join("src/")],
         },
@@ -164,6 +180,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             agent_id: "tester".into(),
             cli_command: "echo".into(),
             tmux_session: "testproject-tester".into(),
+            tmux_target: "testproject-tester".into(),
             inbox_dir: messages.join("to_tester"),
             allowed_write_dirs: vec![root.join("tests/")],
         },
@@ -202,7 +219,7 @@ async fn spawn_all_spawns_each_agent_and_records_state() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let spawned = injector.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 2);
@@ -232,7 +249,7 @@ async fn spawn_all_kills_existing_session_before_spawn() {
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new()).await });
+    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[]).await });
     tokio::time::advance(Duration::from_secs(1)).await;
     handle.await.unwrap();
 
@@ -252,7 +269,7 @@ async fn spawn_all_injects_startup_prompt_after_delay() {
     let mut prompts = HashMap::new();
     prompts.insert("coder".to_string(), "hello".to_string());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&prompts).await });
+    let handle = tokio::spawn(async move { registry.spawn_all(&prompts, &[]).await });
     tokio::time::advance(Duration::from_secs(6)).await;
     handle.await.unwrap();
 
@@ -268,7 +285,7 @@ async fn spawn_all_without_prompt_does_not_inject() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new()).await });
+    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[]).await });
     tokio::time::advance(Duration::from_secs(1)).await;
     handle.await.unwrap();
 
@@ -283,7 +300,7 @@ async fn spawn_all_spawn_failure_is_non_fatal() {
     injector.add_spawn_error_for("testproject-coder");
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let spawned = injector.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 2);
@@ -297,7 +314,7 @@ async fn health_loop_alive_agent_does_not_restart() {
     injector.set_default_has_session(true);
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -319,7 +336,7 @@ async fn health_loop_dead_agent_restarts_and_logs() {
     injector.set_default_has_session(false);
 
     let (registry, _logger, log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -368,7 +385,7 @@ async fn health_loop_degrades_after_five_deaths() {
     injector.set_default_has_session(false);
 
     let (registry, _logger, log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -416,7 +433,7 @@ async fn kill_all_calls_kill_session_for_each_agent() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
     registry.kill_all().await;
 
     let killed = injector.killed.lock().unwrap();
@@ -431,7 +448,7 @@ async fn spawn_all_records_terminal_handle_when_present() {
     injector.set_terminal_handle("testproject-coder", Some(42));
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -458,7 +475,7 @@ async fn spawn_all_omits_terminal_handle_on_linux() {
     injector.set_terminal_handle("testproject-coder", Some(42));
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -477,7 +494,7 @@ async fn spawn_all_omits_terminal_handle_when_none() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -498,7 +515,7 @@ async fn kill_all_with_terminal_handle_does_not_panic() {
     injector.set_terminal_handle("testproject-coder", Some(7));
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
     registry.kill_all().await;
 
     let killed = injector.killed.lock().unwrap();
@@ -537,7 +554,7 @@ async fn kill_all_after_respawn_uses_updated_terminal_handle() {
     );
 
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -567,7 +584,7 @@ async fn session_for_returns_correct_session_name() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
     let session = registry.session_for("coder").await;
     assert_eq!(session, Some("testproject-coder".to_string()));
 }
@@ -578,7 +595,7 @@ async fn session_for_unknown_agent_returns_none() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
     let session = registry.session_for("unknown").await;
     assert_eq!(session, None);
 }
@@ -590,7 +607,7 @@ async fn transcript_loop_captures_and_appends() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.transcript_loop().await });
@@ -651,7 +668,7 @@ async fn transcript_loop_skips_dead_agents() {
     injector.add_spawn_error_for("testproject-tester");
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
 
     let reg_clone = registry.clone();
     let health = tokio::spawn(async move { reg_clone.health_loop().await });

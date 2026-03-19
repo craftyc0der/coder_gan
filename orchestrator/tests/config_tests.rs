@@ -48,6 +48,7 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
         state_path: dot.join("runtime/logs/state.json"),
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
         agents,
+        worker_groups: vec![],
     }
 }
 

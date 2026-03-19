@@ -546,6 +546,32 @@ impl ProjectConfig {
             .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
             .collect();
 
+        // Build worker_inboxes variables for standalone agents.
+        // {{worker_inboxes}} = all group inboxes; {{worker_N_inboxes}} = per-instance.
+        let mut worker_inboxes_all = Vec::new();
+        let mut worker_instance_vars: Vec<(String, String)> = Vec::new();
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                let mut instance_lines = Vec::new();
+                for agent_id in &group.agents {
+                    let expanded = expand_agent_id(agent_id, instance, group.count);
+                    instance_lines.push(format!(
+                        "- {}/to_{}/",
+                        self.messages_dir.display(),
+                        expanded
+                    ));
+                }
+                let block = instance_lines.join("\n");
+                worker_inboxes_all.push(block.clone());
+                // {{worker_1_inboxes}}, {{worker_2_inboxes}}, ...
+                worker_instance_vars.push((
+                    format!("{{{{worker_{}_inboxes}}}}", instance),
+                    block,
+                ));
+            }
+        }
+        let worker_inboxes_rendered = worker_inboxes_all.join("\n");
+
         // Standalone agents
         for agent in &self.agents {
             if grouped_ids.contains(agent.id.as_str()) {
@@ -556,10 +582,16 @@ impl ProjectConfig {
                 return Err(ConfigError::MissingPromptFile(prompt_path));
             }
             let raw = std::fs::read_to_string(&prompt_path)?;
-            let rendered = raw
+            let mut rendered = raw
                 .replace("{{project_root}}", &self.project_root.display().to_string())
                 .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                .replace("{{agent_id}}", &agent.id);
+                .replace("{{agent_id}}", &agent.id)
+                .replace("{{instance_suffix}}", "")
+                .replace("{{peer_inboxes}}", "")
+                .replace("{{worker_inboxes}}", &worker_inboxes_rendered);
+            for (var, value) in &worker_instance_vars {
+                rendered = rendered.replace(var, value);
+            }
             prompts.insert(agent.id.clone(), rendered);
         }
 
@@ -569,6 +601,14 @@ impl ProjectConfig {
 
         for group in &self.worker_groups {
             for instance in 1..=group.count {
+                let instance_suffix = if group.count == 1 {
+                    String::new()
+                } else {
+                    format!("-{}", instance)
+                };
+
+                // Build peer inbox list for this instance (all group members
+                // except the current agent being rendered).
                 for agent_id in &group.agents {
                     let a = match agent_map.get(agent_id.as_str()) {
                         Some(a) => a,
@@ -580,10 +620,28 @@ impl ProjectConfig {
                     }
                     let raw = std::fs::read_to_string(&prompt_path)?;
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
+
+                    // Render peer inboxes: every other agent in this group instance
+                    let peer_inboxes: Vec<String> = group
+                        .agents
+                        .iter()
+                        .filter(|peer| peer.as_str() != agent_id.as_str())
+                        .map(|peer| {
+                            let peer_expanded = expand_agent_id(peer, instance, group.count);
+                            format!(
+                                "- {}/to_{}/",
+                                self.messages_dir.display(),
+                                peer_expanded
+                            )
+                        })
+                        .collect();
+
                     let rendered = raw
                         .replace("{{project_root}}", &self.project_root.display().to_string())
                         .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                        .replace("{{agent_id}}", &expanded_id);
+                        .replace("{{agent_id}}", &expanded_id)
+                        .replace("{{instance_suffix}}", &instance_suffix)
+                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"));
                     prompts.insert(expanded_id, rendered);
                 }
             }

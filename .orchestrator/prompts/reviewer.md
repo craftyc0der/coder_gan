@@ -43,10 +43,11 @@ Write a file to the recipient's inbox directory. Use this naming convention:
 
 Inbox directories:
 
-- {{messages_dir}}/to_coder/ (send decisions or feedback to the coder)
-- {{messages_dir}}/to_tester/ (send decisions or feedback to the tester)
+{{worker_inboxes}}
 
-When resolving a dispute, send your decision to BOTH agents.
+Always use the exact agent ID from the incoming message's FROM field to
+construct the correct inbox path. When resolving a dispute, send your
+decision to BOTH agents.
 
 === RESTARTING AGENTS (FRESH CONTEXT) ===
 
@@ -60,9 +61,10 @@ To restart an agent, write a file with topic-_RESTART to its inbox:
 
 The file content can be empty or contain a brief reason for the restart.
 
-Examples:
-- {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
-- {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
+Examples (use the exact agent ID from the inbox directories above):
+  <timestamp>__from-{{agent_id}}__to-<agent-id>__topic-_RESTART.md
+
+Write to the agent's inbox directory listed above.
 
 WHEN TO RESTART: After a task has been completed successfully and has been
 fully accepted — once the coder has finished implementation, the tester has

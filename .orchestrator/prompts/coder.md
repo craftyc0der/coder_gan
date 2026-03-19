@@ -45,8 +45,8 @@ Write a file to the recipient's inbox directory. Use this naming convention:
 
 Inbox directories:
 
-- {{messages_dir}}/to_tester/ (send test requests to the tester)
-- {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
+{{peer_inboxes}}
+- {{messages_dir}}/to_reviewer/
 
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 

@@ -22,11 +22,10 @@ const AGENT_INIT_DELAY_SECS: u64 = 5;
 const TRANSCRIPT_INTERVAL_SECS: u64 = 30;
 const ACTIVITY_POLL_INTERVAL_SECS: u64 = 3;
 const ATTENTION_POLL_INTERVAL_SECS: u64 = 3;
-const ATTENTION_DEBOUNCE_SECS: i64 = 30;
 /// Number of trailing lines to scan for interactive prompts. Prompts always
-/// appear at the bottom of the terminal, so scanning only the tail reduces
-/// false positives from code/output that happens to contain prompt-like text.
-const ATTENTION_SCAN_LINES: usize = 8;
+/// appear at the very bottom of the terminal so we keep this small to avoid
+/// matching prompt-like text that scrolled past in earlier output.
+const ATTENTION_SCAN_LINES: usize = 4;
 
 // ---------------------------------------------------------------------------
 // Attention detection
@@ -37,45 +36,44 @@ const ATTENTION_SCAN_LINES: usize = 8;
 ///
 /// Patterns are matched against the last [`ATTENTION_SCAN_LINES`] lines of
 /// the pane content so that prompt text embedded in earlier output is ignored.
+///
+/// IMPORTANT: Only include strings that appear literally at the interactive
+/// prompt line itself — NOT phrases the agent might generate in its output.
+/// When in doubt, leave the pattern out; false alerts are worse than a missed
+/// one.
 fn attention_patterns(cli_command: &str) -> &'static [&'static str] {
     match cli_command.split_whitespace().next().unwrap_or("") {
         "claude" => &[
-            "Do you want to",
-            "Allow this",
-            "Would you like to",
-            "[y/N]",
-            "[Y/n]",
-            "(y/n)",
-            "Are you sure",
-            "Press Enter",
+            // The exact permission prompt Claude Code shows
+            "Allow once",
+            "Allow always",
             "Bypass permissions",
         ],
         "codex" => &[
-            "Allow command?",
+            // Codex shows different prompt formats depending on context
             "(y/a/x/e/n)",
-            "Edit or give feedback",
-            "Approve this",
+            "Yes, proceed (y)",
+            "Press enter to confirm or esc to cancel",
         ],
         "copilot" => &[
-            "> Yes",
-            "> No",
-            "Allow for the rest",
-            "tell Copilot what to do",
+            // Copilot CLI shows an interactive selection menu for permission prompts.
+            // The navigation hint sits at the very bottom of the menu box.
+            "Allow for the rest of the session",
+            "to navigate",
         ],
         "cursor" => &[
             "Skip and Continue",
+            "Run this command?",
+            "Skip (esc or n)",
         ],
         "gemini" => &[
+            // Gemini exact approval prompt
             "(y/n/always)",
-            "Trust and execute",
         ],
         _ => &[
-            "[y/N]",
-            "[Y/n]",
-            "(y/n)",
-            "Are you sure?",
-            "Press Enter to continue",
-            "Do you want to proceed",
+            // Fallback — very conservative, only exact bracket prompts on their own
+            "(y/a/x/e/n)",
+            "(y/n/always)",
         ],
     }
 }
@@ -101,12 +99,11 @@ fn detect_attention_pattern(content: &str, cli_command: &str) -> Option<&'static
     None
 }
 
-/// Print a high-visibility attention banner to the orchestrator terminal
-/// and ring the terminal bell.
+/// Print a high-visibility attention banner to the orchestrator terminal.
 fn print_attention_alert(agent_id: &str, tmux_session: &str, pattern: &str) {
     use std::io::Write;
     let banner = format!(
-        "\x07\n\
+        "\n\
          ╔══════════════════════════════════════════════╗\n\
          ║  ⚠  AGENT NEEDS INPUT                       ║\n\
          ║  agent:   {:<35}║\n\
@@ -126,6 +123,8 @@ struct AgentAttentionState {
     last_alerted: Option<DateTime<Utc>>,
     /// Pane hash from the previous poll cycle (to detect "stuck" state).
     prev_hash: Option<u64>,
+    /// Number of consecutive polls where the hash has been stable.
+    stable_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,14 +301,29 @@ impl Registry {
             .flat_map(|g| g.members.iter().map(|m| m.agent_id.clone()))
             .collect();
 
+        // --- Phase 1: spawn all sessions (fast, no blocking) ---
+
         // Spawn worker group sessions (each session = multiple panes)
         for group in worker_groups {
             self.spawn_group(group).await;
+        }
 
-            // Inject startup prompts for each group member
+        // Spawn standalone agents
+        for (id, config) in self.configs.iter() {
+            if grouped_ids.contains(id) {
+                continue;
+            }
+            self.spawn_agent(config).await;
+        }
+
+        // --- Phase 2: single wait for CLI tools to boot ---
+        sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
+
+        // --- Phase 3: inject all startup prompts (fast, no blocking between them) ---
+
+        for group in worker_groups {
             for member in &group.members {
                 if let Some(prompt) = startup_prompts.get(&member.agent_id) {
-                    sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
                     if let Err(e) = self.injector.inject(&member.tmux_target, prompt).await {
                         eprintln!(
                             "[supervisor] failed to inject startup prompt for {}: {e}",
@@ -320,15 +334,11 @@ impl Registry {
             }
         }
 
-        // Spawn standalone agents
         for (id, config) in self.configs.iter() {
             if grouped_ids.contains(id) {
                 continue;
             }
-            self.spawn_agent(config).await;
-
             if let Some(prompt) = startup_prompts.get(id) {
-                sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
                 if let Err(e) = self.injector.inject(&config.tmux_target, prompt).await {
                     eprintln!("[supervisor] failed to inject startup prompt for {id}: {e}");
                 }
@@ -675,8 +685,8 @@ impl Registry {
         loop {
             sleep(Duration::from_secs(ATTENTION_POLL_INTERVAL_SECS)).await;
 
-            // Collect (agent_id, tmux_target, tmux_session, cli_command, status) snapshots
-            let snapshots: Vec<(String, String, String, String, AgentStatus)> = {
+            // Collect (agent_id, tmux_target, tmux_session, cli_command, status, last_start) snapshots
+            let snapshots: Vec<(String, String, String, String, AgentStatus, DateTime<Utc>)> = {
                 let agents = self.agents.lock().await;
                 agents
                     .values()
@@ -693,13 +703,19 @@ impl Registry {
                             a.tmux_session.clone(),
                             config.cli_command.clone(),
                             a.status.clone(),
+                            a.last_start,
                         ))
                     })
                     .collect()
             };
 
-            for (id, target, session, cli_cmd, status) in &snapshots {
+            for (id, target, session, cli_cmd, status, last_start) in &snapshots {
                 if *status == AgentStatus::Dead {
+                    continue;
+                }
+
+                // Skip agents that spawned less than 30 seconds ago
+                if (Utc::now() - *last_start).num_seconds() < 30 {
                     continue;
                 }
 
@@ -716,43 +732,46 @@ impl Registry {
                     active: false,
                     last_alerted: None,
                     prev_hash: None,
+                    stable_count: 0,
                 });
 
                 let hash_stable = state.prev_hash == Some(current_hash);
                 state.prev_hash = Some(current_hash);
 
                 if hash_stable {
-                    // Pane is stuck — check for attention pattern
-                    if let Some(pattern) = detect_attention_pattern(&content, cli_cmd) {
-                        let debounce_ok = state.last_alerted.map_or(true, |t| {
-                            (Utc::now() - t).num_seconds() >= ATTENTION_DEBOUNCE_SECS
-                        });
+                    state.stable_count += 1;
 
-                        if debounce_ok {
-                            // Fire alert
-                            print_attention_alert(id, session, pattern);
-                            self.injector.set_pane_attention_style(target, session);
-                            crate::injector::send_os_notification(
-                                "Agent needs input",
-                                &format!("{} — {}", id, pattern),
-                            );
-                            state.active = true;
-                            state.last_alerted = Some(Utc::now());
-                            self.logger.log(Event::AgentNeedsAttention {
-                                agent_id: id.clone(),
-                                pattern: pattern.to_string(),
-                                source: "auto-detected".to_string(),
-                            });
+                    if state.stable_count >= 1 {
+                        if let Some(pattern) = detect_attention_pattern(&content, cli_cmd) {
+                            if !state.active {
+                                // First detection — red pane + OS notification
+                                print_attention_alert(id, session, pattern);
+                                self.injector.set_pane_attention_style(target, session);
+                                crate::injector::send_os_notification(
+                                    "Agent needs input",
+                                    &format!("{} — {}", id, pattern),
+                                );
+                                state.active = true;
+                                state.last_alerted = Some(Utc::now());
+                                self.logger.log(Event::AgentNeedsAttention {
+                                    agent_id: id.clone(),
+                                    pattern: pattern.to_string(),
+                                    source: "auto-detected".to_string(),
+                                });
+                            }
                         }
                     }
-                } else if state.active {
-                    // Pane changed — agent is no longer blocked; clear visuals
-                    self.injector.clear_pane_attention_style(target, session);
-                    state.active = false;
-                    self.logger.log(Event::AgentAttentionResolved {
-                        agent_id: id.clone(),
-                    });
-                    eprintln!("[attention] {} unblocked — cleared alert", id);
+                } else {
+                    state.stable_count = 0;
+                    if state.active {
+                        // Pane changed — agent is no longer blocked; clear visuals
+                        self.injector.clear_pane_attention_style(target, session);
+                        state.active = false;
+                        self.logger.log(Event::AgentAttentionResolved {
+                            agent_id: id.clone(),
+                        });
+                        eprintln!("[attention] {} unblocked — cleared alert", id);
+                    }
                 }
             }
         }
@@ -791,7 +810,7 @@ impl Registry {
 
         use std::io::Write;
         let banner = format!(
-            "\x07\n\
+            "\n\
              ╔══════════════════════════════════════════════╗\n\
              ║  ⚠  AGENT REQUESTING ATTENTION              ║\n\
              ║  agent:   {:<35}║\n\
@@ -817,9 +836,12 @@ impl Registry {
     /// Kill all agent tmux sessions and close their terminal windows.
     pub async fn kill_all(&self) {
         let agents = self.agents.lock().await;
+        let mut killed_sessions = std::collections::HashSet::new();
         for (id, state) in agents.iter() {
             println!("[supervisor] killing {}", id);
-            self.injector.kill_session(&state.tmux_session);
+            if killed_sessions.insert(state.tmux_session.clone()) {
+                self.injector.kill_session(&state.tmux_session);
+            }
             if let Some(handle) = state.terminal_handle {
                 crate::injector::close_terminal_handle(handle);
             }

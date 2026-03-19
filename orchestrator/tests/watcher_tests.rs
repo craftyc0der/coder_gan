@@ -75,6 +75,18 @@ impl InjectorOps for MockInjector {
     ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
         self.inject(session, text)
     }
+
+    fn spawn_group_session(
+        &self,
+        _session: &str,
+        _cmds: &[&str],
+        _layout: &orchestrator::config::SplitDirection,
+    ) -> Result<Option<u32>, InjectionError> {
+        Ok(None)
+    }
+
+    fn set_pane_attention_style(&self, _target: &str, _session: &str) {}
+    fn clear_pane_attention_style(&self, _target: &str, _session: &str) {}
 }
 
 fn meta_fields(path: &Path) -> (String, String, String, String, String) {
@@ -99,12 +111,13 @@ async fn make_registry(tmp: &TempDir, injector: Arc<dyn InjectorOps>) -> Registr
         agent_id: "coder".into(),
         cli_command: "echo".into(),
         tmux_session: "testproject-coder".into(),
+        tmux_target: "testproject-coder".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
     }];
 
     let registry = Registry::new_with_injector(configs, state_path, log_dir, logger, injector);
-    registry.spawn_all(&HashMap::new()).await;
+    registry.spawn_all(&HashMap::new(), &[]).await;
     registry
 }
 

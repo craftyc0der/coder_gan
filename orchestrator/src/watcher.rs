@@ -382,7 +382,7 @@ impl MessageWatcher {
         }
 
         // Handle _ATTENTION topic: agent is requesting operator attention.
-        // Read the message, fire a bell + visual alert, then move to processed/.
+        // Read the message, fire a visual alert, then move to processed/.
         // The agent continues running — this is a non-blocking signal to the operator.
         if meta.topic.eq_ignore_ascii_case("_attention") {
             println!(

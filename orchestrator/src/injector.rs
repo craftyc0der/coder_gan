@@ -433,7 +433,7 @@ pub fn close_terminal_handle(handle: u32) {
 /// - Linux  : tries `notify-send` (libnotify); silently skips if not installed
 ///
 /// Failures are ignored — this is a best-effort side channel on top of the
-/// existing bell + tmux colour shift.
+/// existing tmux colour shift.
 pub fn send_os_notification(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
