@@ -652,11 +652,22 @@ impl ProjectConfig {
                         })
                         .collect();
 
+                    // Render peer IDs: every other agent in this group instance
+                    let peer_ids: Vec<String> = group
+                        .agents
+                        .iter()
+                        .filter(|peer| peer.as_str() != agent_id.as_str())
+                        .map(|peer| expand_agent_id(peer, instance, group.count))
+                        .collect();
+
                     let rendered = raw
                         .replace("{{project_root}}", &self.project_root.display().to_string())
                         .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                         .replace("{{agent_id}}", &expanded_id)
                         .replace("{{instance_suffix}}", &instance_suffix)
+                        .replace("{{instance_index}}", &instance.to_string())
+                        .replace("{{group_count}}", &group.count.to_string())
+                        .replace("{{peer_ids}}", &peer_ids.join(", "))
                         .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"));
                     prompts.insert(expanded_id, rendered);
                 }
