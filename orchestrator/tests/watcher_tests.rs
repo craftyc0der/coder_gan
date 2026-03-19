@@ -124,6 +124,7 @@ async fn make_registry(tmp: &TempDir, injector: Arc<dyn InjectorOps>) -> Registr
         tmux_target: "testproject-coder".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
+        working_dir: None,
     }];
 
     let registry = Registry::new_with_injector(configs, state_path, log_dir, logger, injector);

@@ -7,3 +7,4 @@ pub mod slack;
 pub mod spike;
 pub mod supervisor;
 pub mod watcher;
+pub mod worktree;

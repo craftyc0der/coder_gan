@@ -23,7 +23,8 @@ coder_gan/
 │       ├── injector.rs   # tmux inject/capture with retry logic
 │       ├── logger.rs     # Structured JSON line event logger
 │       ├── supervisor.rs # Agent spawning, health loop, state persistence
-│       └── watcher.rs    # Filesystem message watcher with routing & dedup
+│       ├── watcher.rs    # Filesystem message watcher with routing & dedup
+│       └── worktree.rs   # Git worktree creation and management
 └── ai_implementation/    # Design docs and brainstorming
 ```
 
@@ -74,6 +75,18 @@ command = "cursor agent"
 prompt_file = "prompts/reviewer.md"
 ```
 
+Optional per-agent worktree fields:
+
+```toml
+[[agents]]
+id = "coder"
+command = "claude"
+prompt_file = "prompts/coder.md"
+allowed_write_dirs = ["src/"]
+branch = "{{branch}}/impl"                   # optional: git branch for worktree (supports {{branch}} template)
+worktree_prompt_file = "prompts/coder-worktree.md"  # optional: appended to prompt when --worktree is active
+```
+
 Supported `command` values: `claude`, `codex`, `copilot`, `cursor agent`, `gemini`.
 
 - **Tmux session names** are auto-derived: `{project-dir-name}-{agent-id}` (e.g., `myproject-coder`)
@@ -90,6 +103,7 @@ The orchestrator has 6 core modules in `orchestrator/src/`:
 4. **Injector** (`injector.rs`) — sends message content into tmux sessions via `tmux load-buffer` + `paste-buffer` + `send-keys Enter`; retry logic (3 attempts, 1s backoff). Also handles cross-platform terminal window launching (Terminal.app on macOS, various emulators on Linux).
 5. **Event Logger** (`logger.rs`) — appends structured JSON lines to `events.jsonl` for all spawn/exit/restart and message routing events
 6. **Spike** (`spike.rs`) — de-risking tool to validate tmux injection against any configured agent
+7. **Worktree** (`worktree.rs`) — git worktree creation and management for isolated agent workspaces
 
 ## Message Protocol
 
@@ -106,6 +120,8 @@ cd orchestrator
 cargo build                                    # build orchestrator
 cargo run -- init /path/to/project             # scaffold .orchestrator/ in a project
 cargo run -- run /path/to/project              # launch all agents
+cargo run -- run /path/to/project --worktree --branch PR-123  # launch with worktrees
+cargo run -- run /path/to/project --branch PR-123             # feature name only (no worktrees)
 cargo run -- spike /path/to/project            # test injection (first agent)
 cargo run -- spike /path/to/project --agent tester  # test specific agent
 cargo run -- status /path/to/project           # check agent health
@@ -114,5 +130,53 @@ cargo test                                     # run tests
 ```
 
 All path arguments default to `.` (current directory) if omitted.
+
+## Worktree Mode
+
+Worktree mode gives each agent its own isolated git worktree checkout, enabling parallel work on separate branches without conflicts.
+
+### Usage
+
+```bash
+orchestrator run --worktree --branch PR-123 /path/to/project
+```
+
+### How It Works
+
+1. **Branch per agent**: Each agent gets its own branch. Default: `<feature>/<agent_id>` (e.g. `PR-123/coder`, `PR-123/reviewer`). Override via `branch` field in `agents.toml`.
+2. **Worktree directories**: Created at `<project>-worktrees/<feature>/<agent_id>/` as siblings of the project directory. E.g. `myproject-worktrees/PR-123/coder/`.
+3. **Shared `.orchestrator/`**: Symlinked from the main project into each worktree so agents share message queues, logs, and config.
+4. **Session naming**: Tmux sessions include the feature name: `<project>-<feature>-<agent>` (e.g. `myproject-PR-123-coder`).
+5. **Agent launch**: Each agent's CLI command runs inside its worktree directory.
+
+### `agents.toml` Worktree Fields
+
+```toml
+[[agents]]
+id = "reviewer"
+command = "claude"
+prompt_file = "prompts/reviewer.md"
+allowed_write_dirs = ["src/"]
+branch = "{{branch}}/review"                        # optional: custom branch pattern ({{branch}} = feature name)
+worktree_prompt_file = "prompts/reviewer-worktree.md"  # optional: appended to prompt when --worktree active
+```
+
+- **`branch`**: Supports `{{branch}}` template variable replaced with the `--branch` CLI value. When omitted, defaults to `<feature>/<agent_id>`.
+- **`worktree_prompt_file`**: Path relative to `.orchestrator/`. Contents are appended to the agent's startup prompt when worktree mode is active. Use this for worktree-specific instructions (e.g. telling the reviewer to merge-and-test, or telling workers to merge the reviewer's branch).
+
+### Prompt Template Variables (Worktree)
+
+| Variable | Description |
+|----------|-------------|
+| `{{my_branch}}` | This agent's git branch name |
+| `{{other_branches}}` | Formatted list of all other agents and their branches |
+| `{{worktree_root}}` | Absolute path to this agent's worktree directory |
+| `{{worktree_prompt}}` | Contents of the agent's `worktree_prompt_file` (if configured) |
+
+If `{{worktree_prompt}}` is not referenced in the base prompt template, the worktree prompt file contents are automatically appended at the end.
+
+### `--branch` Without `--worktree`
+
+Using `--branch PR-123` without `--worktree` decorates tmux session names with the feature name (e.g. `myproject-PR-123-coder`) but does not create worktrees. Useful for distinguishing multiple orchestrator sessions on the same project.
 
 ---

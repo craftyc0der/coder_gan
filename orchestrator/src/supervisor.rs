@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -139,6 +139,10 @@ pub struct AgentConfig {
     pub tmux_target: String,
     pub inbox_dir: PathBuf,
     pub allowed_write_dirs: Vec<PathBuf>,
+    /// Working directory for the agent. When worktree mode is active, this
+    /// points to the agent's git worktree directory.
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
 }
 
 /// A resolved worker group ready for the supervisor to spawn as a single
@@ -377,7 +381,16 @@ impl Registry {
             sleep(Duration::from_millis(500)).await;
         }
 
-        let cmds: Vec<&str> = group.members.iter().map(|m| m.cli_command.as_str()).collect();
+        // Build effective commands, wrapping with cd for worktree mode
+        let effective_cmds: Vec<String> = group
+            .members
+            .iter()
+            .map(|m| match &m.working_dir {
+                Some(dir) => format!("cd {} && {}", shell_escape(dir), m.cli_command),
+                None => m.cli_command.clone(),
+            })
+            .collect();
+        let cmds: Vec<&str> = effective_cmds.iter().map(|s| s.as_str()).collect();
 
         match self
             .injector
@@ -425,9 +438,15 @@ impl Registry {
             sleep(Duration::from_millis(500)).await;
         }
 
+        // Wrap command with cd if working_dir is set (worktree mode)
+        let effective_cmd = match &config.working_dir {
+            Some(dir) => format!("cd {} && {}", shell_escape(dir), config.cli_command),
+            None => config.cli_command.clone(),
+        };
+
         match self
             .injector
-            .spawn_session(&config.tmux_session, &config.cli_command)
+            .spawn_session(&config.tmux_session, &effective_cmd)
         {
             Ok(terminal_handle) => {
                 let state = AgentState {
@@ -1269,5 +1288,15 @@ impl Registry {
                 }
             }
         }
+    }
+}
+
+/// Shell-escape a path for use in a `cd <path> && <cmd>` string.
+fn shell_escape(path: &Path) -> String {
+    let s = path.display().to_string();
+    if s.contains(' ') || s.contains('\'') || s.contains('"') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        s
     }
 }

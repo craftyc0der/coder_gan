@@ -115,6 +115,15 @@ pub struct AgentEntry {
     pub slack: Option<SlackAgentConfig>,
     #[serde(default)]
     pub timers: Vec<TimerEntry>,
+    /// Optional git branch for this agent's worktree. Supports `{{branch}}`
+    /// template variable which is replaced with the `--branch` CLI value.
+    /// When omitted, defaults to `<feature>/<agent_id>`.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Optional prompt file appended to the startup prompt when `--worktree`
+    /// is active. Path is relative to `.orchestrator/` (e.g. `prompts/coder-worktree.md`).
+    #[serde(default)]
+    pub worktree_prompt_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -274,6 +283,11 @@ pub struct ProjectConfig {
     pub transcript_dir: PathBuf,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
+    /// Worktree mode: set when `--worktree --branch <name>` is used.
+    /// Contains the feature/branch name (e.g. "PR-123").
+    pub worktree_feature: Option<String>,
+    /// Resolved worktree info per agent (populated after setup_worktrees).
+    pub worktrees: Vec<crate::worktree::AgentWorktree>,
 }
 
 impl ProjectConfig {
@@ -402,6 +416,8 @@ impl ProjectConfig {
             transcript_dir,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,
+            worktree_feature: None,
+            worktrees: Vec::new(),
         })
     }
 
@@ -452,6 +468,13 @@ impl ProjectConfig {
             .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
             .collect();
 
+        // Build worktree lookup: agent_id -> worktree info
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         let mut configs = Vec::new();
 
         // Standalone agents
@@ -460,6 +483,10 @@ impl ProjectConfig {
                 continue;
             }
             let session = self.tmux_session_for(&a.id);
+            let working_dir = wt_map.get(a.id.as_str()).map(|wt| wt.worktree_path.clone());
+            // When in worktree mode, resolve allowed_write_dirs relative to the
+            // worktree root instead of the main project root.
+            let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
             configs.push(AgentConfig {
                 agent_id: a.id.clone(),
                 cli_command: a.command.clone(),
@@ -469,8 +496,9 @@ impl ProjectConfig {
                 allowed_write_dirs: a
                     .allowed_write_dirs
                     .iter()
-                    .map(|d| self.project_root.join(d))
+                    .map(|d| base_root.join(d))
                     .collect(),
+                working_dir,
             });
         }
 
@@ -488,6 +516,13 @@ impl ProjectConfig {
                     };
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
                     let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    // For grouped agents, look up worktree by expanded ID first,
+                    // then fall back to base agent ID.
+                    let working_dir = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.clone());
+                    let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
                     configs.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -497,8 +532,9 @@ impl ProjectConfig {
                         allowed_write_dirs: a
                             .allowed_write_dirs
                             .iter()
-                            .map(|d| self.project_root.join(d))
+                            .map(|d| base_root.join(d))
                             .collect(),
+                        working_dir,
                     });
                 }
             }
@@ -513,6 +549,13 @@ impl ProjectConfig {
         let agent_map: HashMap<&str, &AgentEntry> =
             self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
 
+        // Build worktree lookup
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         let mut groups = Vec::new();
         for group in &self.worker_groups {
             for instance in 1..=group.count {
@@ -525,6 +568,11 @@ impl ProjectConfig {
                     };
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
                     let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    let working_dir = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.clone());
+                    let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
                     members.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -534,8 +582,9 @@ impl ProjectConfig {
                         allowed_write_dirs: a
                             .allowed_write_dirs
                             .iter()
-                            .map(|d| self.project_root.join(d))
+                            .map(|d| base_root.join(d))
                             .collect(),
+                        working_dir,
                     });
                 }
                 groups.push(WorkerGroupConfig {
@@ -588,6 +637,13 @@ impl ProjectConfig {
         }
         let worker_inboxes_rendered = worker_inboxes_all.join("\n");
 
+        // Build worktree lookup for branch info
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         // Standalone agents
         for agent in &self.agents {
             if grouped_ids.contains(agent.id.as_str()) {
@@ -598,16 +654,53 @@ impl ProjectConfig {
                 return Err(ConfigError::MissingPromptFile(prompt_path));
             }
             let raw = std::fs::read_to_string(&prompt_path)?;
+
+            // Worktree variables
+            let my_branch = wt_map
+                .get(agent.id.as_str())
+                .map(|wt| wt.branch.as_str())
+                .unwrap_or("");
+            let other_branches = if self.worktree_feature.is_some() {
+                crate::worktree::format_other_branches(&self.worktrees, &agent.id)
+            } else {
+                String::new()
+            };
+            let worktree_root = wt_map
+                .get(agent.id.as_str())
+                .map(|wt| wt.worktree_path.display().to_string())
+                .unwrap_or_default();
+
+            // Load worktree prompt appendix if worktree mode is active
+            let worktree_prompt = if self.worktree_feature.is_some() {
+                self.load_worktree_prompt(agent)?
+            } else {
+                String::new()
+            };
+
             let mut rendered = raw
                 .replace("{{project_root}}", &self.project_root.display().to_string())
                 .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                 .replace("{{agent_id}}", &agent.id)
                 .replace("{{instance_suffix}}", "")
                 .replace("{{peer_inboxes}}", "")
-                .replace("{{worker_inboxes}}", &worker_inboxes_rendered);
+                .replace("{{worker_inboxes}}", &worker_inboxes_rendered)
+                .replace("{{my_branch}}", my_branch)
+                .replace("{{other_branches}}", &other_branches)
+                .replace("{{worktree_root}}", &worktree_root)
+                .replace("{{worktree_prompt}}", &worktree_prompt);
             for (var, value) in &worker_instance_vars {
                 rendered = rendered.replace(var, value);
             }
+
+            // Append worktree prompt if present (for prompts that don't use
+            // the {{worktree_prompt}} variable explicitly)
+            if self.worktree_feature.is_some() && !worktree_prompt.is_empty() {
+                if !raw.contains("{{worktree_prompt}}") {
+                    rendered.push_str("\n\n");
+                    rendered.push_str(&worktree_prompt);
+                }
+            }
+
             prompts.insert(agent.id.clone(), rendered);
         }
 
@@ -637,6 +730,29 @@ impl ProjectConfig {
                     let raw = std::fs::read_to_string(&prompt_path)?;
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
 
+                    // Worktree variables
+                    let my_branch = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.branch.as_str())
+                        .unwrap_or("");
+                    let other_branches = if self.worktree_feature.is_some() {
+                        crate::worktree::format_other_branches(&self.worktrees, &expanded_id)
+                    } else {
+                        String::new()
+                    };
+                    let worktree_root = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.display().to_string())
+                        .unwrap_or_default();
+
+                    let worktree_prompt = if self.worktree_feature.is_some() {
+                        self.load_worktree_prompt(a)?
+                    } else {
+                        String::new()
+                    };
+
                     // Render peer inboxes: every other agent in this group instance
                     let peer_inboxes: Vec<String> = group
                         .agents
@@ -660,7 +776,7 @@ impl ProjectConfig {
                         .map(|peer| expand_agent_id(peer, instance, group.count))
                         .collect();
 
-                    let rendered = raw
+                    let mut rendered = raw
                         .replace("{{project_root}}", &self.project_root.display().to_string())
                         .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                         .replace("{{agent_id}}", &expanded_id)
@@ -668,13 +784,45 @@ impl ProjectConfig {
                         .replace("{{instance_index}}", &instance.to_string())
                         .replace("{{group_count}}", &group.count.to_string())
                         .replace("{{peer_ids}}", &peer_ids.join(", "))
-                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"));
+                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"))
+                        .replace("{{my_branch}}", my_branch)
+                        .replace("{{other_branches}}", &other_branches)
+                        .replace("{{worktree_root}}", &worktree_root)
+                        .replace("{{worktree_prompt}}", &worktree_prompt);
+
+                    // Auto-append worktree prompt if not referenced by variable
+                    if self.worktree_feature.is_some() && !worktree_prompt.is_empty() {
+                        if !raw.contains("{{worktree_prompt}}") {
+                            rendered.push_str("\n\n");
+                            rendered.push_str(&worktree_prompt);
+                        }
+                    }
+
                     prompts.insert(expanded_id, rendered);
                 }
             }
         }
 
         Ok(prompts)
+    }
+
+    /// Load the worktree-specific prompt appendix for an agent, if configured.
+    fn load_worktree_prompt(&self, agent: &AgentEntry) -> Result<String, ConfigError> {
+        match &agent.worktree_prompt_file {
+            Some(file) => {
+                let path = self.dot_dir.join(file);
+                if !path.exists() {
+                    return Err(ConfigError::MissingPromptFile(path));
+                }
+                let raw = std::fs::read_to_string(&path)?;
+                // Render template variables in the worktree prompt too
+                Ok(raw
+                    .replace("{{project_root}}", &self.project_root.display().to_string())
+                    .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
+                    .replace("{{agent_id}}", &agent.id))
+            }
+            None => Ok(String::new()),
+        }
     }
 
     /// Build resolved timer configs for all agents.
@@ -703,17 +851,27 @@ impl ProjectConfig {
     }
 
     /// Derive the tmux session name for a standalone agent.
+    /// When worktree mode is active, the feature name is included:
+    /// `<project>-<feature>-<agent>` instead of `<project>-<agent>`.
     pub fn tmux_session_for(&self, agent_id: &str) -> String {
-        format!("{}-{}", self.project_name, agent_id)
+        match &self.worktree_feature {
+            Some(feature) => format!("{}-{}-{}", self.project_name, feature, agent_id),
+            None => format!("{}-{}", self.project_name, agent_id),
+        }
     }
 
     /// Derive the tmux session name for a worker group instance.
     /// When count == 1, no numeric suffix is appended.
+    /// When worktree mode is active, the feature name is included.
     pub fn group_session_for(&self, group_id: &str, instance: u32, total: u32) -> String {
+        let base = match &self.worktree_feature {
+            Some(feature) => format!("{}-{}", self.project_name, feature),
+            None => self.project_name.clone(),
+        };
         if total == 1 {
-            format!("{}-{}", self.project_name, group_id)
+            format!("{}-{}", base, group_id)
         } else {
-            format!("{}-{}-{}", self.project_name, group_id, instance)
+            format!("{}-{}-{}", base, group_id, instance)
         }
     }
 }

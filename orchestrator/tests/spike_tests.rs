@@ -177,6 +177,8 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
         agents,
         worker_groups: vec![],
+        worktree_feature: None,
+        worktrees: vec![],
     }
 }
 
@@ -190,6 +192,8 @@ fn make_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
         AgentEntry {
             id: "tester".into(),
@@ -199,6 +203,8 @@ fn make_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
     ]
 }
@@ -413,6 +419,8 @@ async fn interrupt_spike_sends_correct_keys_for_claude() {
         agent_type: Default::default(),
         slack: None,
         timers: vec![],
+        branch: None,
+        worktree_prompt_file: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
@@ -459,6 +467,8 @@ async fn interrupt_spike_sends_escape_for_copilot() {
         agent_type: Default::default(),
         slack: None,
         timers: vec![],
+        branch: None,
+        worktree_prompt_file: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
@@ -536,6 +546,8 @@ async fn interrupt_spike_post_inject_succeeds() {
         agent_type: Default::default(),
         slack: None,
         timers: vec![],
+        branch: None,
+        worktree_prompt_file: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
