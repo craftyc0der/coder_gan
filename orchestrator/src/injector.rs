@@ -497,6 +497,18 @@ pub fn clear_pane_attention_style(target: &str, session: &str) {
         .status();
 }
 
+/// Check whether a specific tmux pane is still alive (its process has not exited).
+///
+/// Uses the `#{pane_dead}` format variable: "0" = alive, "1" = dead.
+/// Returns `false` if the target doesn't exist or the command fails.
+pub fn is_pane_alive(target: &str) -> bool {
+    Command::new("tmux")
+        .args(["display-message", "-t", target, "-p", "#{pane_dead}"])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
 /// Kill a tmux session.
 pub fn kill_session(session: &str) {
     let _ = Command::new("tmux")
@@ -745,6 +757,8 @@ pub trait InjectorOps: Send + Sync {
     fn capture(&self, session: &str) -> Result<String, InjectionError>;
     /// Send a bare `send-keys` to the tmux session (e.g. for interrupt keys).
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError>;
+    /// Check whether a specific pane is still alive within a tmux session.
+    fn is_pane_alive(&self, target: &str) -> bool;
     /// Apply the "needs attention" visual style to a pane (best-effort, no error).
     fn set_pane_attention_style(&self, target: &str, session: &str);
     /// Clear the "needs attention" visual style and restore defaults (best-effort).
@@ -794,6 +808,9 @@ impl InjectorOps for RealInjector {
     }
     fn send_keys(&self, session: &str, keys: &str) -> Result<(), InjectionError> {
         send_keys(session, keys)
+    }
+    fn is_pane_alive(&self, target: &str) -> bool {
+        is_pane_alive(target)
     }
     fn set_pane_attention_style(&self, target: &str, session: &str) {
         set_pane_attention_style(target, session);

@@ -14,6 +14,7 @@ use orchestrator::watcher::{parse_message, MessageWatcher};
 #[derive(Default)]
 struct MockInjector {
     injected: Mutex<Vec<(String, String)>>,
+    attention_styles: Mutex<Vec<(String, String)>>,
     inject_fail: Mutex<bool>,
 }
 
@@ -67,6 +68,10 @@ impl InjectorOps for MockInjector {
         Ok(())
     }
 
+    fn is_pane_alive(&self, _target: &str) -> bool {
+        true
+    }
+
     fn inject_interrupt<'a>(
         &'a self,
         session: &'a str,
@@ -85,7 +90,12 @@ impl InjectorOps for MockInjector {
         Ok(None)
     }
 
-    fn set_pane_attention_style(&self, _target: &str, _session: &str) {}
+    fn set_pane_attention_style(&self, target: &str, session: &str) {
+        self.attention_styles
+            .lock()
+            .unwrap()
+            .push((target.to_string(), session.to_string()));
+    }
     fn clear_pane_attention_style(&self, _target: &str, _session: &str) {}
 }
 
@@ -244,7 +254,7 @@ async fn route_message_known_recipient_injects_and_moves_processed() {
     let registry_injector = Arc::new(MockInjector::default());
     let watcher_injector = Arc::new(MockInjector::default());
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     let filename = "2026-02-20T12-34-56Z__from-coder__to-coder__topic-tests.md";
     let path = write_inbox(&messages_dir, filename, "hello world");
@@ -271,7 +281,7 @@ async fn route_message_unknown_recipient_dead_letters() {
     let registry_injector = Arc::new(MockInjector::default());
     let watcher_injector = Arc::new(MockInjector::default());
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     let filename = "2026-02-20T12-34-56Z__from-coder__to-ghost__topic-tests.md";
     let inbox = messages_dir.join("to_ghost");
@@ -311,7 +321,7 @@ async fn route_message_inject_failure_dead_letters() {
     let watcher_injector = Arc::new(MockInjector::default());
     watcher_injector.set_inject_fail(true);
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     let filename = "2026-02-20T12-34-56Z__from-coder__to-coder__topic-tests.md";
     let path = write_inbox(&messages_dir, filename, "hello");
@@ -346,7 +356,7 @@ async fn route_message_deduplicates_by_content() {
     let registry_injector = Arc::new(MockInjector::default());
     let watcher_injector = Arc::new(MockInjector::default());
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     let filename1 = "2026-02-20T12-34-56Z__from-coder__to-coder__topic-tests.md";
     let filename2 = "2026-02-20T12-34-57Z__from-coder__to-coder__topic-tests.md";
@@ -372,7 +382,7 @@ async fn route_message_restart_bypasses_dedup() {
     let registry_injector = Arc::new(MockInjector::default());
     let watcher_injector = Arc::new(MockInjector::default());
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     // Send two _RESTART messages with identical content — both should be processed
     let filename1 = "2026-03-14T00-00-01Z__from-reviewer__to-coder__topic-_RESTART.md";
@@ -403,7 +413,7 @@ async fn route_message_restart_topic_respawns_agent() {
     let registry_injector = Arc::new(MockInjector::default());
     let watcher_injector = Arc::new(MockInjector::default());
     let (watcher, messages_dir) =
-        make_watcher(&tmp, registry_injector, watcher_injector.clone()).await;
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
 
     let filename = "2026-03-12T00-00-00Z__from-reviewer__to-coder__topic-_RESTART.md";
     let path = write_inbox(&messages_dir, filename, "task complete, resetting context");
@@ -478,4 +488,86 @@ async fn route_message_frames_header_format() {
             .1
             .starts_with("--- INCOMING MESSAGE ---\nFROM: coder\nTOPIC: tests\nFILE: ")
     );
+}
+
+#[tokio::test]
+async fn route_message_attention_topic_fires_alert_and_moves_processed() {
+    let tmp = TempDir::new().unwrap();
+    let registry_injector = Arc::new(MockInjector::default());
+    let watcher_injector = Arc::new(MockInjector::default());
+    let (watcher, messages_dir) =
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
+
+    let filename = "2026-03-19T00-00-00Z__from-coder__to-coder__topic-_ATTENTION.md";
+    let path = write_inbox(&messages_dir, filename, "I need human approval for this step");
+    let meta = parse_message(&path).unwrap();
+    assert_eq!(meta.topic, "_ATTENTION");
+
+    watcher.route_message(meta).await;
+
+    // Message should be moved to processed
+    let processed = find_named_file(&messages_dir, filename).expect("expected processed file");
+    assert!(
+        processed.to_string_lossy().contains("processed"),
+        "expected processed dir, got {}",
+        processed.display()
+    );
+
+    // _ATTENTION should NOT inject the message into the agent's session
+    let injected = watcher_injector.injected.lock().unwrap();
+    assert_eq!(injected.len(), 0, "attention should not inject message content");
+    drop(injected);
+
+    let attention_styles = registry_injector.attention_styles.lock().unwrap();
+    assert_eq!(attention_styles.len(), 1);
+    assert_eq!(
+        attention_styles[0],
+        ("testproject-coder".to_string(), "testproject-coder".to_string())
+    );
+    drop(attention_styles);
+
+    // Should log an agent_needs_attention event
+    let log_path = tmp
+        .path()
+        .join(".orchestrator/runtime/logs/events.jsonl");
+    let events: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|v| v["event"] == "agent_needs_attention"),
+        "expected agent_needs_attention event"
+    );
+}
+
+#[tokio::test]
+async fn route_message_attention_bypasses_dedup() {
+    let tmp = TempDir::new().unwrap();
+    let registry_injector = Arc::new(MockInjector::default());
+    let watcher_injector = Arc::new(MockInjector::default());
+    let (watcher, messages_dir) =
+        make_watcher(&tmp, registry_injector.clone(), watcher_injector.clone()).await;
+
+    let filename1 = "2026-03-19T00-00-01Z__from-coder__to-coder__topic-_ATTENTION.md";
+    let filename2 = "2026-03-19T00-00-02Z__from-coder__to-coder__topic-_ATTENTION.md";
+
+    let path1 = write_inbox(&messages_dir, filename1, "same plea");
+    let meta1 = parse_message(&path1).unwrap();
+    watcher.route_message(meta1).await;
+
+    let path2 = write_inbox(&messages_dir, filename2, "same plea");
+    let meta2 = parse_message(&path2).unwrap();
+    watcher.route_message(meta2).await;
+
+    // Both should be in processed (not skipped as duplicate)
+    let processed1 = find_named_file(&messages_dir, filename1).expect("first attention processed");
+    assert!(processed1.to_string_lossy().contains("processed"));
+    let processed2 = find_named_file(&messages_dir, filename2).expect("second attention processed");
+    assert!(processed2.to_string_lossy().contains("processed"));
+
+    let attention_styles = registry_injector.attention_styles.lock().unwrap();
+    assert_eq!(attention_styles.len(), 2);
 }

@@ -356,6 +356,22 @@ impl ProjectConfig {
             }
         }
 
+        // Validate that no agent appears in more than one worker group
+        {
+            let mut seen = std::collections::HashSet::new();
+            for group in &agents_toml.worker_groups {
+                for agent_ref in &group.agents {
+                    if !seen.insert(agent_ref.as_str()) {
+                        return Err(ConfigError::InvalidWorkerGroup(format!(
+                            "agent '{}' appears in multiple worker groups; \
+                             each agent may belong to at most one group",
+                            agent_ref
+                        )));
+                    }
+                }
+            }
+        }
+
         // Validate timer entries
         for agent in &agents_toml.agents {
             for timer in &agent.timers {

@@ -152,6 +152,9 @@ impl InjectorOps for MockInjector {
         Ok(None)
     }
 
+    fn is_pane_alive(&self, _target: &str) -> bool {
+        true
+    }
     fn set_pane_attention_style(&self, _target: &str, _session: &str) {}
     fn clear_pane_attention_style(&self, _target: &str, _session: &str) {}
 }
