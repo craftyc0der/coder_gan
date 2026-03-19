@@ -7,18 +7,21 @@
 id = "coder"
 command = "cursor agent"
 prompt_file = "prompts/coder.md"
+worktree_prompt_file = "prompts/coder-worktree.md"
 allowed_write_dirs = ["orchestrator/src/"]
 
 [[agents]]
 id = "tester"
 command = "codex"
 prompt_file = "prompts/tester.md"
+worktree_prompt_file = "prompts/tester-worktree.md"
 allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
 command = "copilot"
 prompt_file = "prompts/reviewer.md"
+worktree_prompt_file = "prompts/reviewer-worktree.md"
 allowed_write_dirs = ["/"]
 
 # Worker group: coder + tester always launch together side-by-side.

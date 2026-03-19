@@ -85,3 +85,5 @@ TOPIC: <topic>
 Wait for instructions. All tasks and context will arrive via messages from
 the coder or the operator. You may read the README.md to get your bearings,
 but wait until you receive a test request before writing tests.
+
+{{worktree_prompt}}
