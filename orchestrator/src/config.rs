@@ -677,7 +677,18 @@ impl ProjectConfig {
                 String::new()
             };
 
-            let mut rendered = raw
+            // Expand {{worktree_prompt}} first so its contents get variable
+            // substitution in the same pass as the rest of the template.
+            let with_worktree = if raw.contains("{{worktree_prompt}}") {
+                raw.replace("{{worktree_prompt}}", &worktree_prompt)
+            } else if !worktree_prompt.is_empty() {
+                // Auto-append if the base prompt doesn't reference it
+                format!("{}\n\n{}", raw, worktree_prompt)
+            } else {
+                raw
+            };
+
+            let mut rendered = with_worktree
                 .replace("{{project_root}}", &self.project_root.display().to_string())
                 .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                 .replace("{{agent_id}}", &agent.id)
@@ -686,19 +697,9 @@ impl ProjectConfig {
                 .replace("{{worker_inboxes}}", &worker_inboxes_rendered)
                 .replace("{{my_branch}}", my_branch)
                 .replace("{{other_branches}}", &other_branches)
-                .replace("{{worktree_root}}", &worktree_root)
-                .replace("{{worktree_prompt}}", &worktree_prompt);
+                .replace("{{worktree_root}}", &worktree_root);
             for (var, value) in &worker_instance_vars {
                 rendered = rendered.replace(var, value);
-            }
-
-            // Append worktree prompt if present (for prompts that don't use
-            // the {{worktree_prompt}} variable explicitly)
-            if self.worktree_feature.is_some() && !worktree_prompt.is_empty() {
-                if !raw.contains("{{worktree_prompt}}") {
-                    rendered.push_str("\n\n");
-                    rendered.push_str(&worktree_prompt);
-                }
             }
 
             prompts.insert(agent.id.clone(), rendered);
@@ -776,7 +777,17 @@ impl ProjectConfig {
                         .map(|peer| expand_agent_id(peer, instance, group.count))
                         .collect();
 
-                    let mut rendered = raw
+                    // Expand {{worktree_prompt}} first so its contents get
+                    // variable substitution in the same pass.
+                    let with_worktree = if raw.contains("{{worktree_prompt}}") {
+                        raw.replace("{{worktree_prompt}}", &worktree_prompt)
+                    } else if !worktree_prompt.is_empty() {
+                        format!("{}\n\n{}", raw, worktree_prompt)
+                    } else {
+                        raw
+                    };
+
+                    let rendered = with_worktree
                         .replace("{{project_root}}", &self.project_root.display().to_string())
                         .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                         .replace("{{agent_id}}", &expanded_id)
@@ -787,16 +798,7 @@ impl ProjectConfig {
                         .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"))
                         .replace("{{my_branch}}", my_branch)
                         .replace("{{other_branches}}", &other_branches)
-                        .replace("{{worktree_root}}", &worktree_root)
-                        .replace("{{worktree_prompt}}", &worktree_prompt);
-
-                    // Auto-append worktree prompt if not referenced by variable
-                    if self.worktree_feature.is_some() && !worktree_prompt.is_empty() {
-                        if !raw.contains("{{worktree_prompt}}") {
-                            rendered.push_str("\n\n");
-                            rendered.push_str(&worktree_prompt);
-                        }
-                    }
+                        .replace("{{worktree_root}}", &worktree_root);
 
                     prompts.insert(expanded_id, rendered);
                 }
@@ -1000,6 +1002,11 @@ pub fn init_project(project_path: &Path) -> Result<(), ConfigError> {
         DEFAULT_REVIEWER_STATUS_CHECK_PROMPT,
     )?;
 
+    // Write worktree-specific prompt files
+    std::fs::write(prompts_dir.join("coder-worktree.md"), DEFAULT_CODER_WORKTREE_PROMPT)?;
+    std::fs::write(prompts_dir.join("tester-worktree.md"), DEFAULT_TESTER_WORKTREE_PROMPT)?;
+    std::fs::write(prompts_dir.join("reviewer-worktree.md"), DEFAULT_REVIEWER_WORKTREE_PROMPT)?;
+
     Ok(())
 }
 
@@ -1088,18 +1095,21 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 id = "coder"
 command = "claude"
 prompt_file = "prompts/coder.md"
+worktree_prompt_file = "prompts/coder-worktree.md"
 allowed_write_dirs = ["src/"]
 
 [[agents]]
 id = "tester"
 command = "codex"
 prompt_file = "prompts/tester.md"
+worktree_prompt_file = "prompts/tester-worktree.md"
 allowed_write_dirs = ["tests/"]
 
 [[agents]]
 id = "reviewer"
 command = "copilot"
 prompt_file = "prompts/reviewer.md"
+worktree_prompt_file = "prompts/reviewer-worktree.md"
 allowed_write_dirs = ["review/"]
 
 # Re-inject the full reviewer prompt every 30 minutes to prevent context drift
@@ -1201,6 +1211,8 @@ by writing to {{messages_dir}}/to_reviewer/ explaining the disagreement.
 Wait for instructions. All tasks and context will arrive via messages from
 other agents or the operator. You may read the README.md to get your bearings,
 but wait until you receive a request before starting work.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_TESTER_PROMPT: &str = r#"You are the TESTER agent in a multi-agent coding system.
@@ -1285,6 +1297,8 @@ TOPIC: <topic>
 Wait for instructions. All tasks and context will arrive via messages from
 the coder or the operator. You may read the README.md to get your bearings,
 but wait until you receive a test request before writing tests.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_REVIEWER_PROMPT: &str = r#"You are the REVIEWER agent in a multi-agent coding system.
@@ -1404,6 +1418,8 @@ TOPIC: <topic>
 Wait for messages from the coder or tester before taking action. You act on
 request, not proactively. All context you need will be provided in the messages
 you receive.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_REVIEWER_STATUS_CHECK_PROMPT: &str = r#"=== AGENT STATUS CHECK ===
@@ -1418,5 +1434,176 @@ activity states and consider:
 
 If you have work to assign to an idle agent, send them a message now with
 clear instructions. If all agents are productively busy, no action is needed.
+"#;
+
+const DEFAULT_CODER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW ===
+
+You are working in a git worktree with your own dedicated branch.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+CRITICAL RULES FOR WORKTREE MODE:
+
+1. COMMIT YOUR WORK. You are on your own branch. You MUST `git add` and
+   `git commit` your changes frequently — at minimum after every logical
+   unit of work. Uncommitted code is invisible to the reviewer and other
+   agents. Small, frequent commits are better than one large commit.
+
+2. INCLUDE YOUR BRANCH IN EVERY MESSAGE. When you send a message to any
+   other agent, always include the line:
+     BRANCH: {{my_branch}}
+   This tells the recipient where to find your code. Without this, they
+   cannot review or test your work.
+
+3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
+   work, pull in the latest approved code from the reviewer's branch:
+     git fetch origin
+     git merge origin/<reviewer-branch> --no-edit
+   If there are merge conflicts, resolve them, commit, and then proceed.
+   The reviewer's branch contains the accepted, tested codebase. Starting
+   from it ensures you are building on approved work, not stale code.
+
+4. WHEN TO MERGE AGAIN. Any time the reviewer tells you they have approved
+   and committed new work, merge their branch again before continuing.
+
+=== WORKFLOW SUMMARY ===
+
+  START:   git merge origin/<reviewer-branch> --no-edit
+  WORK:    write code → git add -A → git commit -m "description"
+  NOTIFY:  send message including BRANCH: {{my_branch}}
+  REPEAT:  merge reviewer branch when told there are new approvals
+"#;
+
+const DEFAULT_TESTER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW ===
+
+You are working in a git worktree with your own dedicated branch.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+CRITICAL RULES FOR WORKTREE MODE:
+
+1. COMMIT YOUR WORK. You are on your own branch. You MUST `git add` and
+   `git commit` your test files after writing or updating them. Uncommitted
+   tests are invisible to the reviewer.
+
+2. INCLUDE YOUR BRANCH IN EVERY MESSAGE. When you send a message to any
+   other agent, always include the line:
+     BRANCH: {{my_branch}}
+   This tells the recipient where to find your tests.
+
+3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
+   work, pull in the latest approved code from the reviewer's branch:
+     git fetch origin
+     git merge origin/<reviewer-branch> --no-edit
+   The reviewer's branch has the accepted implementation code. You need it
+   so your tests can compile and run against the actual source. If there
+   are merge conflicts, resolve them and commit before proceeding.
+
+4. MERGE THE CODER'S BRANCH WHEN TESTING. When the coder sends you a
+   message asking you to test their work, they will include their branch
+   name. Merge their branch to get their implementation code:
+     git fetch origin
+     git merge origin/<coder-branch> --no-edit
+   Then write and run your tests against it.
+
+5. WHEN TO MERGE AGAIN. Any time the reviewer tells you there are new
+   approvals, merge the reviewer's branch before continuing.
+
+=== WORKFLOW SUMMARY ===
+
+  START:   git merge origin/<reviewer-branch> --no-edit
+  TEST:    git merge origin/<coder-branch> --no-edit
+           write tests → run tests → git add -A → git commit -m "description"
+  NOTIFY:  send message including BRANCH: {{my_branch}}
+  REPEAT:  merge reviewer branch when told there are new approvals
+"#;
+
+const DEFAULT_REVIEWER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW (REVIEWER) ===
+
+You are working in a git worktree with your own dedicated branch. Your branch
+is the source of truth — it contains the accepted, approved codebase. Workers
+merge YOUR branch to get the latest approved code before they start working.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+=== HOW TO REVIEW CODE IN WORKTREE MODE ===
+
+When a worker (coder or tester) tells you their work is ready for review,
+they will include their branch name. Use this workflow:
+
+1. MERGE WITHOUT COMMITTING to inspect their changes:
+     git fetch origin
+     git merge --no-commit --no-ff origin/<worker-branch>
+
+   This stages their changes in your working tree without creating a commit,
+   so you can inspect, build, and test before deciding.
+
+2. REVIEW the merged code:
+   - Read the changed files.
+   - Run the build: does it compile?
+   - Run the tests: do they pass?
+   - Check for correctness, edge cases, and code quality.
+
+3. DECIDE:
+
+   IF APPROVED — commit the merge to accept it into the canonical branch:
+     git commit -m "Merge <worker-branch>: <brief description of what was accepted>"
+
+   IF REJECTED — abort the merge and discard the changes:
+     git merge --abort
+   Then send the worker a message explaining what needs to be fixed.
+
+=== CRITICAL RULES ===
+
+1. ALWAYS MERGE WITHOUT COMMITTING FIRST. Never do a bare `git merge` that
+   auto-commits. You must inspect and test before accepting.
+
+2. CONFIRM WORKERS HAVE COMMITTED. Before you try to merge a worker's
+   branch, verify they have actually committed their code. If their message
+   says "I've made changes" but doesn't mention committing, reply asking
+   them to `git add` and `git commit` first. You cannot merge uncommitted
+   work.
+
+3. MERGE ALL WORKER BRANCHES BEFORE RESTARTING AN AGENT. Before you send
+   a _RESTART to any worker, make sure you have already merged (or
+   explicitly rejected) all of their committed work. A restart gives the
+   agent a blank slate — any unmerged committed code on their branch is
+   still there, but the agent will lose context about what it was working
+   on. If you restart a worker without merging their work, you risk
+   orphaning completed code.
+
+4. TELL WORKERS WHEN YOU APPROVE. After you commit a merge, send a message
+   to all workers telling them you have new approved code on your branch.
+   They need to know so they can merge your branch and build on the latest
+   accepted state. Include:
+     BRANCH: {{my_branch}}
+     STATUS: Approved and merged. Please `git merge origin/{{my_branch}}`
+             before continuing your work.
+
+5. YOUR BRANCH IS CANONICAL. Workers merge YOUR branch to start from a
+   known-good state. Never force-push or rewrite history on your branch.
+
+=== REVIEW WORKFLOW SUMMARY ===
+
+  RECEIVE:  worker says "ready for review" with their BRANCH name
+  MERGE:    git fetch origin && git merge --no-commit --no-ff origin/<branch>
+  TEST:     build + run tests
+  APPROVE:  git commit -m "Merge <branch>: ..."  → notify all workers
+  REJECT:   git merge --abort → send feedback with required fixes
 "#;
 
