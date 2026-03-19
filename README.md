@@ -70,34 +70,49 @@ When you run `orchestrator init <project-path>`, this is created inside the targ
 id = "coder"
 command = "claude"
 prompt_file = "prompts/coder.md"        # relative to .orchestrator/
+worktree_prompt_file = "prompts/coder-worktree.md"
 allowed_write_dirs = ["orchestrator/src/"]            # relative to project root
 
 [[agents]]
 id = "tester"
 command = "codex"
 prompt_file = "prompts/tester.md"
+worktree_prompt_file = "prompts/tester-worktree.md"
 allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
 command = "copilot"
 prompt_file = "prompts/reviewer.md"
+worktree_prompt_file = "prompts/reviewer-worktree.md"
+
+# Worker group: coder + tester launch together in a split-pane tmux session.
+# Set count = 2 to run two parallel coder+tester pairs.
+[[worker_groups]]
+id = "worker"
+agents = ["coder", "tester"]
+layout = "horizontal"
+count = 2
 ```
 
 - **Tmux session names** are auto-derived: `{project-dir-name}-{agent-id}` (e.g., `myproject-coder`)
 - **Inbox directories** are auto-derived: `.orchestrator/messages/to_{agent_id}/`
-- **Prompt template variables**: `{{project_root}}`, `{{messages_dir}}`, `{{agent_id}}`
+- **Prompt template variables**: `{{project_root}}`, `{{messages_dir}}`, `{{agent_id}}`, `{{instance_suffix}}`, `{{peer_inboxes}}`, `{{peer_ids}}`, `{{instance_index}}`, `{{group_count}}`, `{{worker_inboxes}}`
+- **Worker groups**: Agents listed in `[[worker_groups]]` launch together in a single tmux session with split panes. When `count > 1`, each instance gets a numeric suffix (e.g., `coder-1`, `coder-2`)
+- **Worktree prompts**: When `--worktree` mode is active, the `worktree_prompt_file` is appended to each agent's startup prompt with git branch/worktree variables
 
 ## Rust Orchestrator Architecture
 
-The orchestrator has 6 core modules in `orchestrator/src/`:
+The orchestrator has 8 core modules in `orchestrator/src/`:
 
-1. **Config** (`config.rs`) — loads `agents.toml`, resolves all paths relative to `.orchestrator/`, renders prompt templates, scaffolds new projects via `init`
-2. **Process Supervisor** (`supervisor.rs`) — spawns agent tmux sessions, tracks restart counts, respawns crashed agents with exponential backoff (cap: 5 restarts in 2 minutes, then mark degraded)
+1. **Config** (`config.rs`) — loads `agents.toml`, resolves all paths relative to `.orchestrator/`, renders prompt templates with group-aware variables, scaffolds new projects via `init`
+2. **Process Supervisor** (`supervisor.rs`) — spawns agent tmux sessions (standalone and grouped), tracks restart counts, respawns crashed agents with exponential backoff (cap: 5 restarts in 2 minutes, then mark degraded), runs attention detection loop to alert when agents need user input
 3. **Message Watcher** (`watcher.rs`) — uses `notify` crate to detect new files in `messages/to_*` directories, routes messages to agent sessions, SHA-256 dedup, backpressure handling
-4. **Injector** (`injector.rs`) — sends message content into tmux sessions via `tmux load-buffer` + `paste-buffer` + `send-keys Enter`; retry logic (3 attempts, 1s backoff). Also handles cross-platform terminal window launching (Terminal.app on macOS, various emulators on Linux).
+4. **Injector** (`injector.rs`) — sends message content into tmux sessions via `tmux load-buffer` + `paste-buffer` + `send-keys Enter`; retry logic (3 attempts, 1s backoff). Spawns group sessions with split panes. Sets visual attention styling (red pane/status bar) on blocked agents. Cross-platform terminal window launching (Terminal.app on macOS, various emulators on Linux).
 5. **Event Logger** (`logger.rs`) — appends structured JSON lines to `events.jsonl` for all spawn/exit/restart and message routing events
 6. **Spike** (`spike.rs`) — de-risking tool to validate tmux injection against any configured agent
+7. **Worktree** (`worktree.rs`) — git worktree setup: creates per-agent branches and worktree directories, symlinks `.orchestrator/` for shared message queues
+8. **Scope** (`scope.rs`) — enforces per-agent write directory restrictions
 
 ## Message Protocol
 
@@ -128,6 +143,7 @@ cd orchestrator
 cargo build                                    # build orchestrator
 cargo run -- init /path/to/project             # scaffold .orchestrator/ in a project
 cargo run -- run /path/to/project              # launch all agents
+cargo run -- run . --worktree --branch PR-123  # launch with git worktrees per agent
 cargo run -- spike /path/to/project            # test injection (first agent)
 cargo run -- spike /path/to/project --agent tester  # test specific agent
 cargo run -- status /path/to/project           # check agent health
@@ -136,5 +152,43 @@ cargo test                                     # run tests
 ```
 
 All path arguments default to `.` (current directory) if omitted.
+
+## Worker Groups
+
+Worker groups let you pair agents that should run side-by-side in a single tmux session with split panes. The `count` field controls how many parallel instances of the group to spawn.
+
+With `count = 2` and agents `["coder", "tester"]`, the orchestrator creates:
+- `coder-gan-worker-1` session: `coder-1` (left pane) + `tester-1` (right pane)
+- `coder-gan-worker-2` session: `coder-2` (left pane) + `tester-2` (right pane)
+- `coder-gan-reviewer` session: standalone reviewer
+
+Each instance gets its own inbox directories (`to_coder-1/`, `to_tester-1/`, etc.) and prompt templates are rendered with instance-specific variables.
+
+## Worktree Mode
+
+Use `--worktree --branch <name>` to give each agent its own git worktree and branch. This lets agents edit files in parallel without merge conflicts.
+
+```bash
+cargo run -- run . --worktree --branch JOM/PR-1057
+```
+
+This creates:
+- `coder_gan-worktrees/JOM/PR-1057/coder-1/` → branch `JOM/PR-1057/coder-1`
+- `coder_gan-worktrees/JOM/PR-1057/tester-1/` → branch `JOM/PR-1057/tester-1`
+- `coder_gan-worktrees/JOM/PR-1057/reviewer/` → branch `JOM/PR-1057/reviewer`
+
+Each worktree gets a symlink to the main `.orchestrator/` directory so all agents share message queues and config. Worktree-specific prompt addenda (git workflow instructions) are appended to each agent's startup prompt automatically.
+
+Coder agents merge the reviewer's branch to pull in approved code. Tester agents share a branch/worktree with their coder partner, so they don't need to merge — the coder handles it for the pair.
+
+## Attention Detection
+
+The supervisor polls agent tmux panes every 3 seconds looking for CLI permission prompts (e.g., "Allow once", "Run this command?", "(y/a/x/e/n)"). When a prompt is detected:
+
+1. The pane background turns **dark red** and the status bar turns red
+2. The window title changes to **[⚠ INPUT NEEDED]**
+3. An **OS notification** is sent (macOS/Linux)
+
+When the agent resumes (pane content changes), the styling automatically clears.
 
 ---
