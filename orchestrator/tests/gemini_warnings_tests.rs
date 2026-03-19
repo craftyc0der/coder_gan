@@ -9,6 +9,8 @@ fn agent(id: &str, command: &str) -> AgentEntry {
         agent_type: Default::default(),
         slack: None,
         timers: vec![],
+        branch: None,
+        worktree_prompt_file: None,
     }
 }
 

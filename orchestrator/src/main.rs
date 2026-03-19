@@ -48,6 +48,14 @@ enum Commands {
         /// Project directory (defaults to current directory)
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Enable git worktree mode: each agent gets its own worktree checkout
+        #[arg(long)]
+        worktree: bool,
+        /// Feature/ticket name used as the branch prefix (e.g. PR-123).
+        /// Required when --worktree is used. Decorates tmux session names and
+        /// is used to derive per-agent branch names.
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Show current agent health and status
     Status {
@@ -109,9 +117,48 @@ async fn main() {
                 spike::run_spike(config, agent.as_deref()).await;
             }
         }
-        Commands::Run { path } => {
+        Commands::Run { path, worktree, branch } => {
             let project_path = resolve_path(&path);
-            let config = load_config_or_exit(&project_path);
+            let mut config = load_config_or_exit(&project_path);
+
+            // Set up worktree mode if requested
+            if worktree {
+                let feature_name = match branch {
+                    Some(ref b) => b.clone(),
+                    None => {
+                        eprintln!("Error: --worktree requires --branch <name>");
+                        std::process::exit(1);
+                    }
+                };
+                config.worktree_feature = Some(feature_name.clone());
+
+                // Collect agent worktree specs: (agent_id, optional branch override)
+                let agent_specs: Vec<(String, Option<String>)> = config
+                    .agents
+                    .iter()
+                    .map(|a| (a.id.clone(), a.branch.clone()))
+                    .collect();
+
+                match orchestrator::worktree::setup_worktrees(
+                    &config.project_root,
+                    &feature_name,
+                    &agent_specs,
+                ) {
+                    Ok(worktrees) => {
+                        config.worktrees = worktrees;
+                        println!("Worktree mode: feature={}", feature_name);
+                    }
+                    Err(e) => {
+                        eprintln!("Error setting up worktrees: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            } else if let Some(ref b) = branch {
+                // --branch without --worktree: just set the feature name
+                // for tmux session decoration
+                config.worktree_feature = Some(b.clone());
+            }
+
             run_orchestrator(config).await;
         }
         Commands::Status { path } => {

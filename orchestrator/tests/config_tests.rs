@@ -57,6 +57,8 @@ fn make_config_with_groups(
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
         agents,
         worker_groups,
+        worktree_feature: None,
+        worktrees: vec![],
     }
 }
 
@@ -70,6 +72,8 @@ fn make_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
         AgentEntry {
             id: "tester".into(),
@@ -79,6 +83,8 @@ fn make_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
     ]
 }
@@ -527,6 +533,8 @@ fn make_group_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
         AgentEntry {
             id: "tester".into(),
@@ -536,6 +544,8 @@ fn make_group_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
         AgentEntry {
             id: "reviewer".into(),
@@ -545,6 +555,8 @@ fn make_group_agents() -> Vec<AgentEntry> {
             agent_type: Default::default(),
             slack: None,
             timers: vec![],
+            branch: None,
+            worktree_prompt_file: None,
         },
     ]
 }

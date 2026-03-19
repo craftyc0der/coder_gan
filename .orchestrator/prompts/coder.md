@@ -80,3 +80,5 @@ by writing to {{messages_dir}}/to_reviewer/ explaining the disagreement.
 Wait for instructions. All tasks and context will arrive via messages from
 other agents or the operator. You may read the README.md to get your bearings,
 but wait until you receive a request before starting work.
+
+{{worktree_prompt}}

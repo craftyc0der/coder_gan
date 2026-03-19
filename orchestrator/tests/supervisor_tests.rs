@@ -196,6 +196,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             tmux_target: "testproject-coder".into(),
             inbox_dir: messages.join("to_coder"),
             allowed_write_dirs: vec![root.join("src/")],
+            working_dir: None,
         },
         AgentConfig {
             agent_id: "tester".into(),
@@ -204,6 +205,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             tmux_target: "testproject-tester".into(),
             inbox_dir: messages.join("to_tester"),
             allowed_write_dirs: vec![root.join("tests/")],
+            working_dir: None,
         },
     ]
 }
@@ -635,6 +637,7 @@ async fn session_for_grouped_agent_returns_pane_target() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -643,6 +646,7 @@ async fn session_for_grouped_agent_returns_pane_target() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -777,6 +781,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -785,6 +790,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -843,6 +849,7 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -851,6 +858,7 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -902,6 +910,7 @@ async fn kill_all_deduplicates_shared_sessions() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -910,6 +919,7 @@ async fn kill_all_deduplicates_shared_sessions() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -957,6 +967,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -965,6 +976,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1074,6 +1086,7 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1082,6 +1095,7 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1172,6 +1186,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
+            working_dir: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1180,6 +1195,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1249,6 +1265,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-coder:0.0".into(),
         inbox_dir: messages.join("to_coder-1"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
     let coder_2 = AgentConfig {
         agent_id: "coder-2".into(),
@@ -1257,6 +1274,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-coder:0.1".into(),
         inbox_dir: messages.join("to_coder-2"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
     let reviewer = AgentConfig {
         agent_id: "reviewer".into(),
@@ -1265,6 +1283,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-reviewer".into(),
         inbox_dir: messages.join("to_reviewer"),
         allowed_write_dirs: vec![],
+            working_dir: None,
     };
 
     let groups = vec![WorkerGroupConfig {

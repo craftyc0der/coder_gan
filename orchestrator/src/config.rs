@@ -115,6 +115,15 @@ pub struct AgentEntry {
     pub slack: Option<SlackAgentConfig>,
     #[serde(default)]
     pub timers: Vec<TimerEntry>,
+    /// Optional git branch for this agent's worktree. Supports `{{branch}}`
+    /// template variable which is replaced with the `--branch` CLI value.
+    /// When omitted, defaults to `<feature>/<agent_id>`.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Optional prompt file appended to the startup prompt when `--worktree`
+    /// is active. Path is relative to `.orchestrator/` (e.g. `prompts/coder-worktree.md`).
+    #[serde(default)]
+    pub worktree_prompt_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -274,6 +283,11 @@ pub struct ProjectConfig {
     pub transcript_dir: PathBuf,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
+    /// Worktree mode: set when `--worktree --branch <name>` is used.
+    /// Contains the feature/branch name (e.g. "PR-123").
+    pub worktree_feature: Option<String>,
+    /// Resolved worktree info per agent (populated after setup_worktrees).
+    pub worktrees: Vec<crate::worktree::AgentWorktree>,
 }
 
 impl ProjectConfig {
@@ -402,6 +416,8 @@ impl ProjectConfig {
             transcript_dir,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,
+            worktree_feature: None,
+            worktrees: Vec::new(),
         })
     }
 
@@ -452,6 +468,13 @@ impl ProjectConfig {
             .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
             .collect();
 
+        // Build worktree lookup: agent_id -> worktree info
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         let mut configs = Vec::new();
 
         // Standalone agents
@@ -460,6 +483,10 @@ impl ProjectConfig {
                 continue;
             }
             let session = self.tmux_session_for(&a.id);
+            let working_dir = wt_map.get(a.id.as_str()).map(|wt| wt.worktree_path.clone());
+            // When in worktree mode, resolve allowed_write_dirs relative to the
+            // worktree root instead of the main project root.
+            let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
             configs.push(AgentConfig {
                 agent_id: a.id.clone(),
                 cli_command: a.command.clone(),
@@ -469,8 +496,9 @@ impl ProjectConfig {
                 allowed_write_dirs: a
                     .allowed_write_dirs
                     .iter()
-                    .map(|d| self.project_root.join(d))
+                    .map(|d| base_root.join(d))
                     .collect(),
+                working_dir,
             });
         }
 
@@ -488,6 +516,13 @@ impl ProjectConfig {
                     };
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
                     let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    // For grouped agents, look up worktree by expanded ID first,
+                    // then fall back to base agent ID.
+                    let working_dir = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.clone());
+                    let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
                     configs.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -497,8 +532,9 @@ impl ProjectConfig {
                         allowed_write_dirs: a
                             .allowed_write_dirs
                             .iter()
-                            .map(|d| self.project_root.join(d))
+                            .map(|d| base_root.join(d))
                             .collect(),
+                        working_dir,
                     });
                 }
             }
@@ -513,6 +549,13 @@ impl ProjectConfig {
         let agent_map: HashMap<&str, &AgentEntry> =
             self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
 
+        // Build worktree lookup
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         let mut groups = Vec::new();
         for group in &self.worker_groups {
             for instance in 1..=group.count {
@@ -525,6 +568,11 @@ impl ProjectConfig {
                     };
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
                     let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    let working_dir = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.clone());
+                    let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
                     members.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -534,8 +582,9 @@ impl ProjectConfig {
                         allowed_write_dirs: a
                             .allowed_write_dirs
                             .iter()
-                            .map(|d| self.project_root.join(d))
+                            .map(|d| base_root.join(d))
                             .collect(),
+                        working_dir,
                     });
                 }
                 groups.push(WorkerGroupConfig {
@@ -588,6 +637,13 @@ impl ProjectConfig {
         }
         let worker_inboxes_rendered = worker_inboxes_all.join("\n");
 
+        // Build worktree lookup for branch info
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
         // Standalone agents
         for agent in &self.agents {
             if grouped_ids.contains(agent.id.as_str()) {
@@ -598,16 +654,54 @@ impl ProjectConfig {
                 return Err(ConfigError::MissingPromptFile(prompt_path));
             }
             let raw = std::fs::read_to_string(&prompt_path)?;
-            let mut rendered = raw
+
+            // Worktree variables
+            let my_branch = wt_map
+                .get(agent.id.as_str())
+                .map(|wt| wt.branch.as_str())
+                .unwrap_or("");
+            let other_branches = if self.worktree_feature.is_some() {
+                crate::worktree::format_other_branches(&self.worktrees, &agent.id)
+            } else {
+                String::new()
+            };
+            let worktree_root = wt_map
+                .get(agent.id.as_str())
+                .map(|wt| wt.worktree_path.display().to_string())
+                .unwrap_or_default();
+
+            // Load worktree prompt appendix if worktree mode is active
+            let worktree_prompt = if self.worktree_feature.is_some() {
+                self.load_worktree_prompt(agent)?
+            } else {
+                String::new()
+            };
+
+            // Expand {{worktree_prompt}} first so its contents get variable
+            // substitution in the same pass as the rest of the template.
+            let with_worktree = if raw.contains("{{worktree_prompt}}") {
+                raw.replace("{{worktree_prompt}}", &worktree_prompt)
+            } else if !worktree_prompt.is_empty() {
+                // Auto-append if the base prompt doesn't reference it
+                format!("{}\n\n{}", raw, worktree_prompt)
+            } else {
+                raw
+            };
+
+            let mut rendered = with_worktree
                 .replace("{{project_root}}", &self.project_root.display().to_string())
                 .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                 .replace("{{agent_id}}", &agent.id)
                 .replace("{{instance_suffix}}", "")
                 .replace("{{peer_inboxes}}", "")
-                .replace("{{worker_inboxes}}", &worker_inboxes_rendered);
+                .replace("{{worker_inboxes}}", &worker_inboxes_rendered)
+                .replace("{{my_branch}}", my_branch)
+                .replace("{{other_branches}}", &other_branches)
+                .replace("{{worktree_root}}", &worktree_root);
             for (var, value) in &worker_instance_vars {
                 rendered = rendered.replace(var, value);
             }
+
             prompts.insert(agent.id.clone(), rendered);
         }
 
@@ -637,6 +731,29 @@ impl ProjectConfig {
                     let raw = std::fs::read_to_string(&prompt_path)?;
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
 
+                    // Worktree variables
+                    let my_branch = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.branch.as_str())
+                        .unwrap_or("");
+                    let other_branches = if self.worktree_feature.is_some() {
+                        crate::worktree::format_other_branches(&self.worktrees, &expanded_id)
+                    } else {
+                        String::new()
+                    };
+                    let worktree_root = wt_map
+                        .get(expanded_id.as_str())
+                        .or_else(|| wt_map.get(agent_id.as_str()))
+                        .map(|wt| wt.worktree_path.display().to_string())
+                        .unwrap_or_default();
+
+                    let worktree_prompt = if self.worktree_feature.is_some() {
+                        self.load_worktree_prompt(a)?
+                    } else {
+                        String::new()
+                    };
+
                     // Render peer inboxes: every other agent in this group instance
                     let peer_inboxes: Vec<String> = group
                         .agents
@@ -660,7 +777,17 @@ impl ProjectConfig {
                         .map(|peer| expand_agent_id(peer, instance, group.count))
                         .collect();
 
-                    let rendered = raw
+                    // Expand {{worktree_prompt}} first so its contents get
+                    // variable substitution in the same pass.
+                    let with_worktree = if raw.contains("{{worktree_prompt}}") {
+                        raw.replace("{{worktree_prompt}}", &worktree_prompt)
+                    } else if !worktree_prompt.is_empty() {
+                        format!("{}\n\n{}", raw, worktree_prompt)
+                    } else {
+                        raw
+                    };
+
+                    let rendered = with_worktree
                         .replace("{{project_root}}", &self.project_root.display().to_string())
                         .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
                         .replace("{{agent_id}}", &expanded_id)
@@ -668,13 +795,36 @@ impl ProjectConfig {
                         .replace("{{instance_index}}", &instance.to_string())
                         .replace("{{group_count}}", &group.count.to_string())
                         .replace("{{peer_ids}}", &peer_ids.join(", "))
-                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"));
+                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"))
+                        .replace("{{my_branch}}", my_branch)
+                        .replace("{{other_branches}}", &other_branches)
+                        .replace("{{worktree_root}}", &worktree_root);
+
                     prompts.insert(expanded_id, rendered);
                 }
             }
         }
 
         Ok(prompts)
+    }
+
+    /// Load the worktree-specific prompt appendix for an agent, if configured.
+    fn load_worktree_prompt(&self, agent: &AgentEntry) -> Result<String, ConfigError> {
+        match &agent.worktree_prompt_file {
+            Some(file) => {
+                let path = self.dot_dir.join(file);
+                if !path.exists() {
+                    return Err(ConfigError::MissingPromptFile(path));
+                }
+                let raw = std::fs::read_to_string(&path)?;
+                // Render template variables in the worktree prompt too
+                Ok(raw
+                    .replace("{{project_root}}", &self.project_root.display().to_string())
+                    .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
+                    .replace("{{agent_id}}", &agent.id))
+            }
+            None => Ok(String::new()),
+        }
     }
 
     /// Build resolved timer configs for all agents.
@@ -703,17 +853,27 @@ impl ProjectConfig {
     }
 
     /// Derive the tmux session name for a standalone agent.
+    /// When worktree mode is active, the feature name is included:
+    /// `<project>-<feature>-<agent>` instead of `<project>-<agent>`.
     pub fn tmux_session_for(&self, agent_id: &str) -> String {
-        format!("{}-{}", self.project_name, agent_id)
+        match &self.worktree_feature {
+            Some(feature) => format!("{}-{}-{}", self.project_name, feature, agent_id),
+            None => format!("{}-{}", self.project_name, agent_id),
+        }
     }
 
     /// Derive the tmux session name for a worker group instance.
     /// When count == 1, no numeric suffix is appended.
+    /// When worktree mode is active, the feature name is included.
     pub fn group_session_for(&self, group_id: &str, instance: u32, total: u32) -> String {
+        let base = match &self.worktree_feature {
+            Some(feature) => format!("{}-{}", self.project_name, feature),
+            None => self.project_name.clone(),
+        };
         if total == 1 {
-            format!("{}-{}", self.project_name, group_id)
+            format!("{}-{}", base, group_id)
         } else {
-            format!("{}-{}-{}", self.project_name, group_id, instance)
+            format!("{}-{}-{}", base, group_id, instance)
         }
     }
 }
@@ -842,6 +1002,11 @@ pub fn init_project(project_path: &Path) -> Result<(), ConfigError> {
         DEFAULT_REVIEWER_STATUS_CHECK_PROMPT,
     )?;
 
+    // Write worktree-specific prompt files
+    std::fs::write(prompts_dir.join("coder-worktree.md"), DEFAULT_CODER_WORKTREE_PROMPT)?;
+    std::fs::write(prompts_dir.join("tester-worktree.md"), DEFAULT_TESTER_WORKTREE_PROMPT)?;
+    std::fs::write(prompts_dir.join("reviewer-worktree.md"), DEFAULT_REVIEWER_WORKTREE_PROMPT)?;
+
     Ok(())
 }
 
@@ -930,18 +1095,21 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 id = "coder"
 command = "claude"
 prompt_file = "prompts/coder.md"
+worktree_prompt_file = "prompts/coder-worktree.md"
 allowed_write_dirs = ["src/"]
 
 [[agents]]
 id = "tester"
 command = "codex"
 prompt_file = "prompts/tester.md"
+worktree_prompt_file = "prompts/tester-worktree.md"
 allowed_write_dirs = ["tests/"]
 
 [[agents]]
 id = "reviewer"
 command = "copilot"
 prompt_file = "prompts/reviewer.md"
+worktree_prompt_file = "prompts/reviewer-worktree.md"
 allowed_write_dirs = ["review/"]
 
 # Re-inject the full reviewer prompt every 30 minutes to prevent context drift
@@ -995,23 +1163,26 @@ details. All context the tester needs should be included in your messages.
 
 Example message to the tester:
 
-  I've implemented the `parse_config(path: &str) -> Result<Config, ConfigError>`
-  function in src/config.rs. It reads a TOML file and returns a Config struct.
+I've implemented the `parse_config(path: &str) -> Result<Config, ConfigError>`
+function in src/config.rs. It reads a TOML file and returns a Config struct.
 
-  Please write tests that verify:
-  - Valid TOML files parse successfully and all fields are populated.
-  - Missing required fields return `ConfigError::MissingField`.
-  - Malformed TOML returns `ConfigError::ParseError`.
-  - The path argument handles both absolute and relative paths.
+Please write tests that verify:
+
+Valid TOML files parse successfully and all fields are populated.
+Missing required fields return `ConfigError::MissingField`.
+Malformed TOML returns `ConfigError::ParseError`.
+
+- The path argument handles both absolute and relative paths.
 
 === HOW TO SEND MESSAGES ===
 
 Write a file to the recipient's inbox directory. Use this naming convention:
-<timestamp>__from-{{agent_id}}__to-<recipient>__topic-<topic>.md
+<timestamp>**from-{{agent_id}}**to-<recipient>\_\_topic-<topic>.md
 
 Inbox directories:
-- {{messages_dir}}/to_tester/   (send test requests to the tester)
-- {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
+
+{{peer_inboxes}}
+- {{messages_dir}}/to_reviewer/
 
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
@@ -1020,6 +1191,7 @@ to the agent or operator who made the request. Do NOT simply complete the work
 without notifying the requester.
 
 Your completion message must be written to the requesting agent's inbox and must:
+
 1. Confirm what was done.
 2. Include any output, results, or next steps the requester needs to proceed.
 
@@ -1032,6 +1204,7 @@ Messages from other agents will be pasted into this session with a header:
 --- INCOMING MESSAGE ---
 FROM: <agent>
 TOPIC: <topic>
+
 ---
 
 When the tester sends you questions or disagreements, answer them directly.
@@ -1043,6 +1216,8 @@ by writing to {{messages_dir}}/to_reviewer/ explaining the disagreement.
 Wait for instructions. All tasks and context will arrive via messages from
 other agents or the operator. You may read the README.md to get your bearings,
 but wait until you receive a request before starting work.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_TESTER_PROMPT: &str = r#"You are the TESTER agent in a multi-agent coding system.
@@ -1062,6 +1237,7 @@ DO NOT WRITE TO: src/
 === HOW YOU RECEIVE WORK ===
 
 The coder will send you messages describing:
+
 1. What the code does and what behavior should be tested.
 2. The public API — function signatures, types, error cases.
 3. Suggested test scenarios.
@@ -1077,14 +1253,15 @@ the implementation has a bug.
 If something is unclear or you disagree with the coder's API design, send your
 questions directly to the coder. Be specific about what is ambiguous:
 
-  I have a question about `parse_config`. Your API description doesn't mention
-  what happens when the path is an empty string vs. missing entirely. Should
-  those be different errors?
+I have a question about `parse_config`. Your API description doesn't mention
+what happens when the path is an empty string vs. missing entirely. Should
+those be different errors?
 
 === HANDLING DISAGREEMENTS ===
 
 If you and the coder cannot resolve a disagreement after exchanging messages,
 escalate to the reviewer. Write a message to the reviewer that includes:
+
 1. A summary of the disagreement.
 2. Your position and reasoning.
 3. The coder's position (quote their message if helpful).
@@ -1095,11 +1272,12 @@ The reviewer will moderate and send a decision back to both of you.
 === HOW TO SEND MESSAGES ===
 
 Write a file to the recipient's inbox directory. Use this naming convention:
-<timestamp>__from-{{agent_id}}__to-<recipient>__topic-<topic>.md
+<timestamp>**from-{{agent_id}}**to-<recipient>\_\_topic-<topic>.md
 
 Inbox directories:
-- {{messages_dir}}/to_coder/    (send questions or results to the coder)
-- {{messages_dir}}/to_reviewer/ (escalate disagreements to the reviewer)
+
+{{peer_inboxes}}
+- {{messages_dir}}/to_reviewer/
 
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
@@ -1108,6 +1286,7 @@ to the agent or operator who made the request. Do NOT simply complete the work
 without notifying the requester.
 
 Your completion message must be written to the requesting agent's inbox and must:
+
 1. Confirm what was done.
 2. Include any output, results, or next steps the requester needs to proceed.
 
@@ -1120,6 +1299,7 @@ Messages from other agents will be pasted into this session with a header:
 --- INCOMING MESSAGE ---
 FROM: <agent>
 TOPIC: <topic>
+
 ---
 
 === GETTING STARTED ===
@@ -1127,6 +1307,8 @@ TOPIC: <topic>
 Wait for instructions. All tasks and context will arrive via messages from
 the coder or the operator. You may read the README.md to get your bearings,
 but wait until you receive a test request before writing tests.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_REVIEWER_PROMPT: &str = r#"You are the REVIEWER agent in a multi-agent coding system.
@@ -1152,14 +1334,17 @@ no need to write review documents to disk unless explicitly asked to do so.
 
 When the coder and tester escalate a disagreement to you, they will send a
 message explaining:
+
 1. What the disagreement is about.
 2. Each side's position and reasoning.
 3. What they want you to decide.
 
 Your job is to:
+
 1. Read both positions carefully.
-2. Make a clear decision based on the arguments presented.
-3. Send your decision to BOTH the coder and the tester so they can proceed.
+2. Consider the requirements and context provided in the messages.
+3. Make a clear decision.
+4. Send your decision to BOTH the coder and the tester so they can proceed.
 
 Be direct and specific. Don't just say "the coder is right" — explain why and
 what the tester should change (or vice versa).
@@ -1167,13 +1352,15 @@ what the tester should change (or vice versa).
 === HOW TO SEND MESSAGES ===
 
 Write a file to the recipient's inbox directory. Use this naming convention:
-<timestamp>__from-{{agent_id}}__to-<recipient>__topic-<topic>.md
+<timestamp>**from-{{agent_id}}**to-<recipient>\_\_topic-<topic>.md
 
 Inbox directories:
-- {{messages_dir}}/to_coder/  (send decisions or feedback to the coder)
-- {{messages_dir}}/to_tester/ (send decisions or feedback to the tester)
 
-When resolving a dispute, send your decision to BOTH agents.
+{{worker_inboxes}}
+
+Always use the exact agent ID from the incoming message's FROM field to
+construct the correct inbox path. When resolving a dispute, send your
+decision to BOTH agents.
 
 === RESTARTING AGENTS (FRESH CONTEXT) ===
 
@@ -1187,9 +1374,10 @@ To restart an agent, write a file with topic-_RESTART to its inbox:
 
 The file content can be empty or contain a brief reason for the restart.
 
-Examples:
-- {{messages_dir}}/to_coder/<timestamp>__from-{{agent_id}}__to-coder__topic-_RESTART.md
-- {{messages_dir}}/to_tester/<timestamp>__from-{{agent_id}}__to-tester__topic-_RESTART.md
+Examples (use the exact agent ID from the inbox directories above):
+  <timestamp>__from-{{agent_id}}__to-<agent-id>__topic-_RESTART.md
+
+Write to the agent's inbox directory listed above.
 
 WHEN TO RESTART: After a task has been completed successfully and has been
 fully accepted — once the coder has finished implementation, the tester has
@@ -1220,6 +1408,7 @@ WHEN TO INTERRUPT:
 - You need an agent to drop what it's doing and handle something urgent.
 - An agent appears stuck in a loop or producing incorrect output.
 
+
 === CRITICAL REQUIREMENT: REPLY TO REQUESTER ===
 
 Whenever you finish requested work, you MUST send a completion message directly
@@ -1227,6 +1416,7 @@ to the agent or operator who made the request. Do NOT simply complete the work
 without notifying the requester.
 
 Your completion message must be written to the requesting agent's inbox and must:
+
 1. Confirm what was done.
 2. Include any output, results, or next steps the requester needs to proceed.
 
@@ -1239,6 +1429,7 @@ Messages from other agents will be pasted into this session with a header:
 --- INCOMING MESSAGE ---
 FROM: <agent>
 TOPIC: <topic>
+
 ---
 
 === GETTING STARTED ===
@@ -1246,6 +1437,8 @@ TOPIC: <topic>
 Wait for messages from the coder or tester before taking action. You act on
 request, not proactively. All context you need will be provided in the messages
 you receive.
+
+{{worktree_prompt}}
 "#;
 
 const DEFAULT_REVIEWER_STATUS_CHECK_PROMPT: &str = r#"=== AGENT STATUS CHECK ===
@@ -1260,5 +1453,158 @@ activity states and consider:
 
 If you have work to assign to an idle agent, send them a message now with
 clear instructions. If all agents are productively busy, no action is needed.
+"#;
+
+const DEFAULT_CODER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW ===
+
+You are working in a git worktree with your own dedicated branch.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+CRITICAL RULES FOR WORKTREE MODE:
+
+1. COMMIT YOUR WORK. You are on your own branch. You MUST `git add` and
+   `git commit` your changes frequently — at minimum after every logical
+   unit of work. Uncommitted code is invisible to the reviewer and other
+   agents. Small, frequent commits are better than one large commit.
+
+2. INCLUDE YOUR BRANCH IN EVERY MESSAGE. When you send a message to any
+   other agent, always include the line:
+     BRANCH: {{my_branch}}
+   This tells the recipient where to find your code. Without this, they
+   cannot review or test your work.
+
+3. MERGE THE REVIEWER'S BRANCH BEFORE STARTING. Before you begin any new
+   work, pull in the latest approved code from the reviewer's branch:
+     git merge <reviewer-branch> --no-edit
+   If there are merge conflicts, resolve them, commit, and then proceed.
+   The reviewer's branch contains the accepted, tested codebase. Starting
+   from it ensures you are building on approved work, not stale code.
+
+4. WHEN TO MERGE AGAIN. Any time the reviewer tells you they have approved
+   and committed new work, merge their branch again before continuing.
+
+=== WORKFLOW SUMMARY ===
+
+  START:   git merge <reviewer-branch> --no-edit
+  WORK:    write code → git add -A → git commit -m "description"
+  NOTIFY:  send message including BRANCH: {{my_branch}}
+  REPEAT:  merge reviewer branch when told there are new approvals
+"#;
+
+const DEFAULT_TESTER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW ===
+
+You are working in a git worktree shared with your coder partner.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+CRITICAL RULES FOR WORKTREE MODE:
+
+1. COMMIT YOUR WORK. You MUST `git add` and `git commit` your test files
+   after writing or updating them. Uncommitted tests are invisible to the
+   reviewer.
+
+2. INCLUDE YOUR BRANCH IN EVERY MESSAGE. When you send a message to any
+   other agent, always include the line:
+     BRANCH: {{my_branch}}
+   This tells the recipient where to find your tests.
+
+3. YOU DO NOT NEED TO MERGE. Your coder partner shares the same branch
+   and worktree. Their implementation code is already available to you.
+   The coder is responsible for merging the reviewer's approved code into
+   your shared branch when needed.
+
+=== WORKFLOW SUMMARY ===
+
+  WORK:    write tests → run tests → git add -A → git commit -m "description"
+  NOTIFY:  send message including BRANCH: {{my_branch}}
+"#;
+
+const DEFAULT_REVIEWER_WORKTREE_PROMPT: &str = r#"
+=== WORKTREE MODE — GIT WORKFLOW (REVIEWER) ===
+
+You are working in a git worktree with your own dedicated branch. Your branch
+is the source of truth — it contains the accepted, approved codebase. Workers
+merge YOUR branch to get the latest approved code before they start working.
+
+YOUR BRANCH: {{my_branch}}
+YOUR WORKTREE: {{worktree_root}}
+
+Other agents and their branches:
+{{other_branches}}
+
+=== HOW TO REVIEW CODE IN WORKTREE MODE ===
+
+When a worker (coder or tester) tells you their work is ready for review,
+they will include their branch name. Use this workflow:
+
+1. MERGE WITHOUT COMMITTING to inspect their changes:
+     git merge --no-commit --no-ff <worker-branch>
+
+   This stages their changes in your working tree without creating a commit,
+   so you can inspect, build, and test before deciding.
+
+2. REVIEW the merged code:
+   - Read the changed files.
+   - Run the build: does it compile?
+   - Run the tests: do they pass?
+   - Check for correctness, edge cases, and code quality.
+
+3. DECIDE:
+
+   IF APPROVED — commit the merge to accept it into the canonical branch:
+     git commit -m "Merge <worker-branch>: <brief description of what was accepted>"
+
+   IF REJECTED — abort the merge and discard the changes:
+     git merge --abort
+   Then send the worker a message explaining what needs to be fixed.
+
+=== CRITICAL RULES ===
+
+1. ALWAYS MERGE WITHOUT COMMITTING FIRST. Never do a bare `git merge` that
+   auto-commits. You must inspect and test before accepting.
+
+2. CONFIRM WORKERS HAVE COMMITTED. Before you try to merge a worker's
+   branch, verify they have actually committed their code. If their message
+   says "I've made changes" but doesn't mention committing, reply asking
+   them to `git add` and `git commit` first. You cannot merge uncommitted
+   work.
+
+3. MERGE ALL WORKER BRANCHES BEFORE RESTARTING AN AGENT. Before you send
+   a _RESTART to any worker, make sure you have already merged (or
+   explicitly rejected) all of their committed work. A restart gives the
+   agent a blank slate — any unmerged committed code on their branch is
+   still there, but the agent will lose context about what it was working
+   on. If you restart a worker without merging their work, you risk
+   orphaning completed code.
+
+4. TELL WORKERS WHEN YOU APPROVE. After you commit a merge, send a message
+   to all workers telling them you have new approved code on your branch.
+   They need to know so they can merge your branch and build on the latest
+   accepted state. Include:
+     BRANCH: {{my_branch}}
+     STATUS: Approved and merged. Please `git merge {{my_branch}}`
+             before continuing your work.
+
+5. YOUR BRANCH IS CANONICAL. Workers merge YOUR branch to start from a
+   known-good state. Never force-push or rewrite history on your branch.
+
+=== REVIEW WORKFLOW SUMMARY ===
+
+  RECEIVE:  worker says "ready for review" with their BRANCH name
+  MERGE:    git merge --no-commit --no-ff <branch>
+  TEST:     build + run tests
+  APPROVE:  git commit -m "Merge <branch>: ..."  → notify all workers
+  REJECT:   git merge --abort → send feedback with required fixes
 "#;
 

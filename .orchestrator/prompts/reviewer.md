@@ -124,3 +124,5 @@ TOPIC: <topic>
 Wait for messages from the coder or tester before taking action. You act on
 request, not proactively. All context you need will be provided in the messages
 you receive.
+
+{{worktree_prompt}}
