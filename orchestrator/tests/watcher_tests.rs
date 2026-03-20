@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use orchestrator::injector::{InjectionError, InjectorOps, InterruptKeys};
 use orchestrator::logger::Logger;
 use orchestrator::supervisor::{AgentConfig, Registry};
-use orchestrator::watcher::{parse_message, MessageWatcher};
+use orchestrator::watcher::{maybe_repair_worktree_dot_orchestrator, parse_message, MessageWatcher};
 
 #[derive(Default)]
 struct MockInjector {
@@ -221,6 +221,53 @@ fn parse_message_falls_back_to_parent_dir_recipient() {
     let path = Path::new("/tmp/to_coder/2026-02-20T12-34-56Z.msg");
     let (_filename, _sender, recipient, _topic, _) = meta_fields(path);
     assert_eq!(recipient, "coder");
+}
+
+#[test]
+fn maybe_repair_worktree_dot_orchestrator_repairs_replaced_directory() {
+    let tmp = TempDir::new().unwrap();
+    let shared_dot = tmp.path().join("main/.orchestrator");
+    let worktree_root = tmp.path().join("wt/reviewer");
+    let broken_dot = worktree_root.join(".orchestrator");
+
+    std::fs::create_dir_all(&shared_dot).unwrap();
+    std::fs::create_dir_all(&broken_dot).unwrap();
+    std::fs::write(broken_dot.join("stale.txt"), "stale\n").unwrap();
+
+    let repaired = maybe_repair_worktree_dot_orchestrator(
+        &broken_dot,
+        &shared_dot,
+        &[worktree_root.clone()],
+    );
+
+    assert!(repaired);
+
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::symlink_metadata(&broken_dot).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(std::fs::read_link(&broken_dot).unwrap(), shared_dot);
+    }
+}
+
+#[test]
+fn maybe_repair_worktree_dot_orchestrator_ignores_missing_path() {
+    let tmp = TempDir::new().unwrap();
+    let shared_dot = tmp.path().join("main/.orchestrator");
+    let worktree_root = tmp.path().join("wt/reviewer");
+    let missing_dot = worktree_root.join(".orchestrator");
+
+    std::fs::create_dir_all(&shared_dot).unwrap();
+    std::fs::create_dir_all(&worktree_root).unwrap();
+
+    let repaired = maybe_repair_worktree_dot_orchestrator(
+        &missing_dot,
+        &shared_dot,
+        &[worktree_root.clone()],
+    );
+
+    assert!(!repaired);
+    assert!(!missing_dot.exists());
 }
 
 #[test]

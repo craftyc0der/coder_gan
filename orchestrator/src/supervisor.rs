@@ -11,6 +11,22 @@ use crate::config::{ResolvedTimer, SplitDirection};
 use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
+fn effective_command(config: &AgentConfig) -> String {
+    match &config.working_dir {
+        Some(dir) => format!("cd {} && {}", shell_escape(dir), config.cli_command),
+        None => config.cli_command.clone(),
+    }
+}
+
+fn shared_dot_orchestrator_dir(config: &AgentConfig) -> Option<PathBuf> {
+    config
+        .working_dir
+        .as_ref()
+        .and_then(|_| config.inbox_dir.parent())
+        .and_then(|messages_dir| messages_dir.parent())
+        .map(Path::to_path_buf)
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -60,11 +76,17 @@ pub fn attention_patterns(cli_command: &str) -> &'static [&'static str] {
             // The navigation hint sits at the very bottom of the menu box.
             "Allow for the rest of the session",
             "to navigate",
+            "Write to this file?",
+            "Proceed (y)",
+            "Run Everything",
         ],
         "cursor" => &[
             "Skip and Continue",
             "Run this command?",
             "Skip (esc or n)",
+            "Write to this file?",
+            "Proceed (y)",
+            "Run Everything",
         ],
         "gemini" => &[
             // Gemini exact approval prompt
@@ -369,10 +391,30 @@ impl Registry {
         }
     }
 
+    fn ensure_worktree_link(&self, config: &AgentConfig) {
+        let Some(worktree_root) = config.working_dir.as_deref() else {
+            return;
+        };
+        let Some(shared_dot_dir) = shared_dot_orchestrator_dir(config) else {
+            return;
+        };
+
+        if let Err(err) = crate::worktree::ensure_dot_orchestrator_symlink(&shared_dot_dir, worktree_root) {
+            eprintln!(
+                "[supervisor] failed to repair .orchestrator symlink for {}: {err}",
+                config.agent_id
+            );
+        }
+    }
+
     /// Spawn a worker group as a single tmux session with multiple panes.
     async fn spawn_group(&self, group: &WorkerGroupConfig) {
         if group.members.is_empty() {
             return;
+        }
+
+        for member in &group.members {
+            self.ensure_worktree_link(member);
         }
 
         // Kill any leftover session
@@ -382,14 +424,7 @@ impl Registry {
         }
 
         // Build effective commands, wrapping with cd for worktree mode
-        let effective_cmds: Vec<String> = group
-            .members
-            .iter()
-            .map(|m| match &m.working_dir {
-                Some(dir) => format!("cd {} && {}", shell_escape(dir), m.cli_command),
-                None => m.cli_command.clone(),
-            })
-            .collect();
+        let effective_cmds: Vec<String> = group.members.iter().map(effective_command).collect();
         let cmds: Vec<&str> = effective_cmds.iter().map(|s| s.as_str()).collect();
 
         match self
@@ -432,6 +467,8 @@ impl Registry {
 
     /// Spawn a single standalone agent in its own tmux session.
     async fn spawn_agent(&self, config: &AgentConfig) {
+        self.ensure_worktree_link(config);
+
         // Kill leftover session if any
         if self.injector.has_session(&config.tmux_session) {
             self.injector.kill_session(&config.tmux_session);
@@ -439,10 +476,7 @@ impl Registry {
         }
 
         // Wrap command with cd if working_dir is set (worktree mode)
-        let effective_cmd = match &config.working_dir {
-            Some(dir) => format!("cd {} && {}", shell_escape(dir), config.cli_command),
-            None => config.cli_command.clone(),
-        };
+        let effective_cmd = effective_command(config);
 
         match self
             .injector
@@ -487,6 +521,10 @@ impl Registry {
     pub async fn health_loop(self) {
         loop {
             sleep(Duration::from_secs(HEALTH_POLL_INTERVAL_SECS)).await;
+
+            for config in self.configs.values() {
+                self.ensure_worktree_link(config);
+            }
 
             let agent_ids: Vec<String> = {
                 let agents = self.agents.lock().await;
@@ -664,6 +702,7 @@ impl Registry {
                             });
 
                             if let Some(config) = self.configs.get(id) {
+                                self.ensure_worktree_link(config);
                                 let attempt = {
                                     let mut agents = self.agents.lock().await;
                                     if let Some(a) = agents.get_mut(id) {
@@ -695,9 +734,11 @@ impl Registry {
                                 );
                                 sleep(backoff).await;
 
+                                let effective_cmd = effective_command(config);
+
                                 match self
                                     .injector
-                                    .respawn_pane(&config.tmux_target, &config.cli_command)
+                                    .respawn_pane(&config.tmux_target, &effective_cmd)
                                 {
                                     Ok(()) => {
                                         {
@@ -782,6 +823,7 @@ impl Registry {
 
                         if should_restart {
                             if let Some(config) = self.configs.get(id) {
+                                self.ensure_worktree_link(config);
                                 let (attempt, old_handle) = {
                                     let agents = self.agents.lock().await;
                                     let (count, handle) = agents
@@ -797,9 +839,11 @@ impl Registry {
                                 );
                                 sleep(backoff).await;
 
+                                let effective_cmd = effective_command(config);
+
                                 match self
                                     .injector
-                                    .spawn_session(&config.tmux_session, &config.cli_command)
+                                    .spawn_session(&config.tmux_session, &effective_cmd)
                                 {
                                     Ok(new_handle) => {
                                         if let Some(handle) = old_handle {
@@ -1123,12 +1167,16 @@ impl Registry {
             .get(agent_id)
             .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
 
+        self.ensure_worktree_link(config);
+
         // Respawn the pane — kills the running process and starts the CLI
         // command fresh, keeping the tmux session (and terminal) intact.
         // Uses tmux_target (which includes the pane index for grouped agents)
         // so tmux respawns the correct pane, not whichever happens to be active.
+        let effective_cmd = effective_command(config);
+
         self.injector
-            .respawn_pane(&config.tmux_target, &config.cli_command)
+            .respawn_pane(&config.tmux_target, &effective_cmd)
             .map_err(|e| format!("failed to respawn pane for {agent_id}: {e}"))?;
 
         // Update state

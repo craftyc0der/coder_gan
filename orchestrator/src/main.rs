@@ -357,11 +357,22 @@ async fn run_orchestrator(config: ProjectConfig) {
     }
 
     // Start the filesystem message watcher
-    let msg_watcher = Arc::new(MessageWatcher::new(
-        registry.clone(),
-        logger.clone(),
-        config.messages_dir.clone(),
-    ));
+    let worktree_roots: Vec<std::path::PathBuf> = config
+        .worktrees
+        .iter()
+        .map(|wt| wt.worktree_path.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let msg_watcher = Arc::new(
+        MessageWatcher::new(
+            registry.clone(),
+            logger.clone(),
+            config.messages_dir.clone(),
+        )
+        .with_worktree_symlink_watch(config.dot_dir.clone(), worktree_roots),
+    );
     msg_watcher.start().await;
     println!("Message watcher started.\n");
 

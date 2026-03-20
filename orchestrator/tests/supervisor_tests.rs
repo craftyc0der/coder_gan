@@ -773,6 +773,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
     let injector = Arc::new(MockInjector::default());
     let root = tmp.path().to_path_buf();
     let messages = root.join(".orchestrator/messages");
+    let worktree_dir = root.join("worktrees/worker-1");
 
     let coder_cfg = AgentConfig {
         agent_id: "coder".into(),
@@ -781,7 +782,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
-            working_dir: None,
+        working_dir: Some(worktree_dir.clone()),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -959,6 +960,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
     injector.set_pane_alive_queue("testproject-worker:0.0", vec![false, true]);
     let root = tmp.path().to_path_buf();
     let messages = root.join(".orchestrator/messages");
+    let worktree_dir = root.join("worktrees/worker-1");
 
     let coder_cfg = AgentConfig {
         agent_id: "coder".into(),
@@ -967,7 +969,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
-            working_dir: None,
+        working_dir: Some(worktree_dir.clone()),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1040,7 +1042,10 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
     let respawned = injector.respawned.lock().unwrap();
     assert_eq!(respawned.len(), 1);
     assert_eq!(respawned[0].0, "testproject-worker:0.0");
-    assert_eq!(respawned[0].1, "claude");
+    assert_eq!(
+        respawned[0].1,
+        format!("cd {} && claude", worktree_dir.display())
+    );
     drop(respawned);
 
     let injected = injector.injected.lock().unwrap();
@@ -1178,6 +1183,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
     let injector = Arc::new(MockInjector::default());
     let root = tmp.path().to_path_buf();
     let messages = root.join(".orchestrator/messages");
+    let worktree_dir = root.join("worktrees/worker-1");
 
     let coder_cfg = AgentConfig {
         agent_id: "coder".into(),
@@ -1186,7 +1192,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
-            working_dir: None,
+        working_dir: Some(worktree_dir.clone()),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1238,7 +1244,10 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
     let respawned = injector.respawned.lock().unwrap();
     assert_eq!(respawned.len(), 1);
     assert_eq!(respawned[0].0, "testproject-worker:0.0");
-    assert_eq!(respawned[0].1, "claude");
+    assert_eq!(
+        respawned[0].1,
+        format!("cd {} && claude", worktree_dir.display())
+    );
     drop(respawned);
 
     let injected = injector.injected.lock().unwrap();
@@ -1325,15 +1334,15 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
     let prompt_path = tmp.path().join("timer_prompt.md");
     std::fs::write(&prompt_path, "status sweep").unwrap();
 
-    let timers = vec![ResolvedTimer {
-        agent_id: "reviewer".into(),
-        minutes: 0,
+    let timers = vec![ResolvedTimer::new_basic(
+        "reviewer".into(),
+        0,
         prompt_path,
-        project_root: root.display().to_string(),
-        messages_dir: messages.display().to_string(),
-        interrupt: false,
-        include_agents: vec!["coder".into(), "reviewer".into(), "ghost".into()],
-    }];
+        root.display().to_string(),
+        messages.display().to_string(),
+        false,
+        vec!["coder".into(), "reviewer".into(), "ghost".into()],
+    )];
 
     let timer_task = tokio::spawn({
         let registry = registry.clone();
@@ -1393,12 +1402,14 @@ fn attention_patterns_codex_includes_confirmation_prompts() {
 fn attention_patterns_copilot_includes_navigation_hint() {
     let patterns = attention_patterns("copilot");
     assert!(patterns.iter().any(|p| p.contains("to navigate")));
+    assert!(patterns.iter().any(|p| p.contains("Write to this file?")));
 }
 
 #[test]
 fn attention_patterns_cursor_includes_skip_prompt() {
     let patterns = attention_patterns("cursor agent");
     assert!(patterns.iter().any(|p| p.contains("Skip and Continue")));
+    assert!(patterns.iter().any(|p| p.contains("Write to this file?")));
 }
 
 #[test]
@@ -1458,4 +1469,18 @@ fn detect_attention_pattern_cursor_prompt() {
     let content = "Would you like to proceed?\nSkip and Continue\n";
     let result = detect_attention_pattern(content, "cursor agent");
     assert_eq!(result, Some("Skip and Continue"));
+}
+
+#[test]
+fn detect_attention_pattern_cursor_write_prompt() {
+    let content = "Write to this file?\nProceed (y)\nReject & propose changes\nRun Everything\n";
+    let result = detect_attention_pattern(content, "cursor agent");
+    assert_eq!(result, Some("Write to this file?"));
+}
+
+#[test]
+fn detect_attention_pattern_copilot_write_prompt() {
+    let content = "Write to this file?\nin /tmp/package.json\nProceed (y)\nRun Everything\n";
+    let result = detect_attention_pattern(content, "copilot");
+    assert_eq!(result, Some("Write to this file?"));
 }

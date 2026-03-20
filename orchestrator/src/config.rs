@@ -290,7 +290,165 @@ pub struct ProjectConfig {
     pub worktrees: Vec<crate::worktree::AgentWorktree>,
 }
 
+#[derive(Debug, Clone)]
+struct PromptTemplateContext {
+    project_root: String,
+    messages_dir: String,
+    agent_id: String,
+    instance_suffix: String,
+    instance_index: String,
+    group_count: String,
+    peer_ids: String,
+    peer_inboxes: String,
+    worker_inboxes: String,
+    worker_instance_vars: Vec<(String, String)>,
+    my_branch: String,
+    other_branches: String,
+    worktree_root: String,
+}
+
+fn apply_prompt_template_variables(raw: String, context: &PromptTemplateContext) -> String {
+    let mut rendered = raw
+        .replace("{{project_root}}", &context.project_root)
+        .replace("{{messages_dir}}", &context.messages_dir)
+        .replace("{{agent_id}}", &context.agent_id)
+        .replace("{{instance_suffix}}", &context.instance_suffix)
+        .replace("{{instance_index}}", &context.instance_index)
+        .replace("{{group_count}}", &context.group_count)
+        .replace("{{peer_ids}}", &context.peer_ids)
+        .replace("{{peer_inboxes}}", &context.peer_inboxes)
+        .replace("{{worker_inboxes}}", &context.worker_inboxes)
+        .replace("{{my_branch}}", &context.my_branch)
+        .replace("{{other_branches}}", &context.other_branches)
+        .replace("{{worktree_root}}", &context.worktree_root);
+
+    for (var, value) in &context.worker_instance_vars {
+        rendered = rendered.replace(var, value);
+    }
+
+    rendered
+}
+
+fn render_prompt_template(
+    raw: String,
+    context: &PromptTemplateContext,
+    worktree_prompt: &str,
+) -> String {
+    let with_worktree = if raw.contains("{{worktree_prompt}}") {
+        raw.replace("{{worktree_prompt}}", worktree_prompt)
+    } else if !worktree_prompt.is_empty() {
+        format!("{}\n\n{}", raw, worktree_prompt)
+    } else {
+        raw
+    };
+
+    apply_prompt_template_variables(with_worktree, context)
+}
+
 impl ProjectConfig {
+    fn prompt_project_root(&self) -> String {
+        if self.worktree_feature.is_some() {
+            ".".to_string()
+        } else {
+            self.project_root.display().to_string()
+        }
+    }
+
+    fn prompt_messages_dir(&self) -> String {
+        if self.worktree_feature.is_some() {
+            ".orchestrator/messages".to_string()
+        } else {
+            self.messages_dir.display().to_string()
+        }
+    }
+
+    fn prompt_worktree_root(&self, worktree: Option<&crate::worktree::AgentWorktree>) -> String {
+        match (self.worktree_feature.is_some(), worktree) {
+            (true, Some(_)) => ".".to_string(),
+            (_, Some(wt)) => wt.worktree_path.display().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    fn worker_inbox_template_vars(&self) -> (String, Vec<(String, String)>) {
+        let prompt_messages_dir = self.prompt_messages_dir();
+        let mut worker_inboxes_all = Vec::new();
+        let mut worker_instance_vars = Vec::new();
+
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                let mut instance_lines = Vec::new();
+                for agent_id in &group.agents {
+                    let expanded = expand_agent_id(agent_id, instance, group.count);
+                    instance_lines.push(format!("- {}/to_{}/", prompt_messages_dir, expanded));
+                }
+                let block = instance_lines.join("\n");
+                worker_inboxes_all.push(block.clone());
+                worker_instance_vars.push((format!("{{{{worker_{}_inboxes}}}}", instance), block));
+            }
+        }
+
+        (worker_inboxes_all.join("\n"), worker_instance_vars)
+    }
+
+    fn prompt_template_context(
+        &self,
+        agent_id: &str,
+        instance: u32,
+        group_count: u32,
+        peer_ids: Vec<String>,
+        peer_inboxes: Vec<String>,
+        worker_inboxes: &str,
+        worker_instance_vars: &[(String, String)],
+        worktree: Option<&crate::worktree::AgentWorktree>,
+    ) -> PromptTemplateContext {
+        let instance_suffix = if group_count == 1 {
+            String::new()
+        } else {
+            format!("-{}", instance)
+        };
+
+        let other_branches = if self.worktree_feature.is_some() {
+            crate::worktree::format_other_branches(&self.worktrees, agent_id)
+        } else {
+            String::new()
+        };
+
+        PromptTemplateContext {
+            project_root: self.prompt_project_root(),
+            messages_dir: self.prompt_messages_dir(),
+            agent_id: agent_id.to_string(),
+            instance_suffix,
+            instance_index: instance.to_string(),
+            group_count: group_count.to_string(),
+            peer_ids: peer_ids.join(", "),
+            peer_inboxes: peer_inboxes.join("\n"),
+            worker_inboxes: worker_inboxes.to_string(),
+            worker_instance_vars: worker_instance_vars.to_vec(),
+            my_branch: worktree.map(|wt| wt.branch.clone()).unwrap_or_default(),
+            other_branches,
+            worktree_root: self.prompt_worktree_root(worktree),
+        }
+    }
+
+    fn load_worktree_prompt(
+        &self,
+        agent: &AgentEntry,
+        context: &PromptTemplateContext,
+    ) -> Result<String, ConfigError> {
+        match &agent.worktree_prompt_file {
+            Some(file) => {
+                let path = self.dot_dir.join(file);
+                if !path.exists() {
+                    return Err(ConfigError::MissingPromptFile(path));
+                }
+                let raw = std::fs::read_to_string(&path)?;
+                Ok(apply_prompt_template_variables(raw, context))
+            }
+            None => Ok(String::new()),
+        }
+    }
+
     /// Load configuration from `<project_path>/.orchestrator/agents.toml`.
     pub fn load(project_path: &Path) -> Result<Self, ConfigError> {
         let project_root = std::fs::canonicalize(project_path).map_err(ConfigError::IoError)?;
@@ -610,32 +768,7 @@ impl ProjectConfig {
             .iter()
             .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
             .collect();
-
-        // Build worker_inboxes variables for standalone agents.
-        // {{worker_inboxes}} = all group inboxes; {{worker_N_inboxes}} = per-instance.
-        let mut worker_inboxes_all = Vec::new();
-        let mut worker_instance_vars: Vec<(String, String)> = Vec::new();
-        for group in &self.worker_groups {
-            for instance in 1..=group.count {
-                let mut instance_lines = Vec::new();
-                for agent_id in &group.agents {
-                    let expanded = expand_agent_id(agent_id, instance, group.count);
-                    instance_lines.push(format!(
-                        "- {}/to_{}/",
-                        self.messages_dir.display(),
-                        expanded
-                    ));
-                }
-                let block = instance_lines.join("\n");
-                worker_inboxes_all.push(block.clone());
-                // {{worker_1_inboxes}}, {{worker_2_inboxes}}, ...
-                worker_instance_vars.push((
-                    format!("{{{{worker_{}_inboxes}}}}", instance),
-                    block,
-                ));
-            }
-        }
-        let worker_inboxes_rendered = worker_inboxes_all.join("\n");
+        let (worker_inboxes_rendered, worker_instance_vars) = self.worker_inbox_template_vars();
 
         // Build worktree lookup for branch info
         let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
@@ -654,53 +787,24 @@ impl ProjectConfig {
                 return Err(ConfigError::MissingPromptFile(prompt_path));
             }
             let raw = std::fs::read_to_string(&prompt_path)?;
+            let context = self.prompt_template_context(
+                &agent.id,
+                1,
+                1,
+                Vec::new(),
+                Vec::new(),
+                &worker_inboxes_rendered,
+                &worker_instance_vars,
+                wt_map.get(agent.id.as_str()).copied(),
+            );
 
-            // Worktree variables
-            let my_branch = wt_map
-                .get(agent.id.as_str())
-                .map(|wt| wt.branch.as_str())
-                .unwrap_or("");
-            let other_branches = if self.worktree_feature.is_some() {
-                crate::worktree::format_other_branches(&self.worktrees, &agent.id)
-            } else {
-                String::new()
-            };
-            let worktree_root = wt_map
-                .get(agent.id.as_str())
-                .map(|wt| wt.worktree_path.display().to_string())
-                .unwrap_or_default();
-
-            // Load worktree prompt appendix if worktree mode is active
             let worktree_prompt = if self.worktree_feature.is_some() {
-                self.load_worktree_prompt(agent)?
+                self.load_worktree_prompt(agent, &context)?
             } else {
                 String::new()
             };
 
-            // Expand {{worktree_prompt}} first so its contents get variable
-            // substitution in the same pass as the rest of the template.
-            let with_worktree = if raw.contains("{{worktree_prompt}}") {
-                raw.replace("{{worktree_prompt}}", &worktree_prompt)
-            } else if !worktree_prompt.is_empty() {
-                // Auto-append if the base prompt doesn't reference it
-                format!("{}\n\n{}", raw, worktree_prompt)
-            } else {
-                raw
-            };
-
-            let mut rendered = with_worktree
-                .replace("{{project_root}}", &self.project_root.display().to_string())
-                .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                .replace("{{agent_id}}", &agent.id)
-                .replace("{{instance_suffix}}", "")
-                .replace("{{peer_inboxes}}", "")
-                .replace("{{worker_inboxes}}", &worker_inboxes_rendered)
-                .replace("{{my_branch}}", my_branch)
-                .replace("{{other_branches}}", &other_branches)
-                .replace("{{worktree_root}}", &worktree_root);
-            for (var, value) in &worker_instance_vars {
-                rendered = rendered.replace(var, value);
-            }
+            let rendered = render_prompt_template(raw, &context, &worktree_prompt);
 
             prompts.insert(agent.id.clone(), rendered);
         }
@@ -711,12 +815,6 @@ impl ProjectConfig {
 
         for group in &self.worker_groups {
             for instance in 1..=group.count {
-                let instance_suffix = if group.count == 1 {
-                    String::new()
-                } else {
-                    format!("-{}", instance)
-                };
-
                 // Build peer inbox list for this instance (all group members
                 // except the current agent being rendered).
                 for agent_id in &group.agents {
@@ -731,28 +829,10 @@ impl ProjectConfig {
                     let raw = std::fs::read_to_string(&prompt_path)?;
                     let expanded_id = expand_agent_id(agent_id, instance, group.count);
 
-                    // Worktree variables
-                    let my_branch = wt_map
+                    let worktree = wt_map
                         .get(expanded_id.as_str())
                         .or_else(|| wt_map.get(agent_id.as_str()))
-                        .map(|wt| wt.branch.as_str())
-                        .unwrap_or("");
-                    let other_branches = if self.worktree_feature.is_some() {
-                        crate::worktree::format_other_branches(&self.worktrees, &expanded_id)
-                    } else {
-                        String::new()
-                    };
-                    let worktree_root = wt_map
-                        .get(expanded_id.as_str())
-                        .or_else(|| wt_map.get(agent_id.as_str()))
-                        .map(|wt| wt.worktree_path.display().to_string())
-                        .unwrap_or_default();
-
-                    let worktree_prompt = if self.worktree_feature.is_some() {
-                        self.load_worktree_prompt(a)?
-                    } else {
-                        String::new()
-                    };
+                        .copied();
 
                     // Render peer inboxes: every other agent in this group instance
                     let peer_inboxes: Vec<String> = group
@@ -763,7 +843,7 @@ impl ProjectConfig {
                             let peer_expanded = expand_agent_id(peer, instance, group.count);
                             format!(
                                 "- {}/to_{}/",
-                                self.messages_dir.display(),
+                                self.prompt_messages_dir(),
                                 peer_expanded
                             )
                         })
@@ -777,28 +857,24 @@ impl ProjectConfig {
                         .map(|peer| expand_agent_id(peer, instance, group.count))
                         .collect();
 
-                    // Expand {{worktree_prompt}} first so its contents get
-                    // variable substitution in the same pass.
-                    let with_worktree = if raw.contains("{{worktree_prompt}}") {
-                        raw.replace("{{worktree_prompt}}", &worktree_prompt)
-                    } else if !worktree_prompt.is_empty() {
-                        format!("{}\n\n{}", raw, worktree_prompt)
+                    let context = self.prompt_template_context(
+                        &expanded_id,
+                        instance,
+                        group.count,
+                        peer_ids,
+                        peer_inboxes,
+                        &worker_inboxes_rendered,
+                        &worker_instance_vars,
+                        worktree,
+                    );
+
+                    let worktree_prompt = if self.worktree_feature.is_some() {
+                        self.load_worktree_prompt(a, &context)?
                     } else {
-                        raw
+                        String::new()
                     };
 
-                    let rendered = with_worktree
-                        .replace("{{project_root}}", &self.project_root.display().to_string())
-                        .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                        .replace("{{agent_id}}", &expanded_id)
-                        .replace("{{instance_suffix}}", &instance_suffix)
-                        .replace("{{instance_index}}", &instance.to_string())
-                        .replace("{{group_count}}", &group.count.to_string())
-                        .replace("{{peer_ids}}", &peer_ids.join(", "))
-                        .replace("{{peer_inboxes}}", &peer_inboxes.join("\n"))
-                        .replace("{{my_branch}}", my_branch)
-                        .replace("{{other_branches}}", &other_branches)
-                        .replace("{{worktree_root}}", &worktree_root);
+                    let rendered = render_prompt_template(raw, &context, &worktree_prompt);
 
                     prompts.insert(expanded_id, rendered);
                 }
@@ -808,47 +884,133 @@ impl ProjectConfig {
         Ok(prompts)
     }
 
-    /// Load the worktree-specific prompt appendix for an agent, if configured.
-    fn load_worktree_prompt(&self, agent: &AgentEntry) -> Result<String, ConfigError> {
-        match &agent.worktree_prompt_file {
-            Some(file) => {
-                let path = self.dot_dir.join(file);
-                if !path.exists() {
-                    return Err(ConfigError::MissingPromptFile(path));
-                }
-                let raw = std::fs::read_to_string(&path)?;
-                // Render template variables in the worktree prompt too
-                Ok(raw
-                    .replace("{{project_root}}", &self.project_root.display().to_string())
-                    .replace("{{messages_dir}}", &self.messages_dir.display().to_string())
-                    .replace("{{agent_id}}", &agent.id))
-            }
-            None => Ok(String::new()),
-        }
-    }
-
     /// Build resolved timer configs for all agents.
     /// Stores paths and template variables so prompts are read fresh at fire time.
     pub fn resolved_timers(&self) -> Result<Vec<ResolvedTimer>, ConfigError> {
         let mut timers = Vec::new();
+        let grouped_ids: std::collections::HashSet<&str> = self
+            .worker_groups
+            .iter()
+            .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
+            .collect();
+        let agent_map: HashMap<&str, &AgentEntry> =
+            self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+        let (worker_inboxes_rendered, worker_instance_vars) = self.worker_inbox_template_vars();
+
         for agent in &self.agents {
+            if grouped_ids.contains(agent.id.as_str()) {
+                continue;
+            }
+
             for timer in &agent.timers {
                 let prompt_path = self.dot_dir.join(&timer.prompt_file);
-                // Validate the file exists at load time
                 if !prompt_path.exists() {
                     return Err(ConfigError::MissingPromptFile(prompt_path));
                 }
+
+                let context = self.prompt_template_context(
+                    &agent.id,
+                    1,
+                    1,
+                    Vec::new(),
+                    Vec::new(),
+                    &worker_inboxes_rendered,
+                    &worker_instance_vars,
+                    wt_map.get(agent.id.as_str()).copied(),
+                );
+                let worktree_prompt_path = agent
+                    .worktree_prompt_file
+                    .as_ref()
+                    .map(|file| self.dot_dir.join(file));
+                if let Some(path) = &worktree_prompt_path {
+                    if !path.exists() {
+                        return Err(ConfigError::MissingPromptFile(path.clone()));
+                    }
+                }
+
                 timers.push(ResolvedTimer {
                     agent_id: agent.id.clone(),
                     minutes: timer.minutes,
                     prompt_path,
-                    project_root: self.project_root.display().to_string(),
-                    messages_dir: self.messages_dir.display().to_string(),
                     interrupt: timer.interrupt,
                     include_agents: timer.include_agents.clone(),
+                    template_context: context,
+                    worktree_prompt_path,
                 });
             }
         }
+
+        for group in &self.worker_groups {
+            for instance in 1..=group.count {
+                for agent_id in &group.agents {
+                    let agent = match agent_map.get(agent_id.as_str()) {
+                        Some(agent) => *agent,
+                        None => continue,
+                    };
+                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
+                    let peer_inboxes: Vec<String> = group
+                        .agents
+                        .iter()
+                        .filter(|peer| peer.as_str() != agent_id.as_str())
+                        .map(|peer| {
+                            let peer_expanded = expand_agent_id(peer, instance, group.count);
+                            format!("- {}/to_{}/", self.prompt_messages_dir(), peer_expanded)
+                        })
+                        .collect();
+                    let peer_ids: Vec<String> = group
+                        .agents
+                        .iter()
+                        .filter(|peer| peer.as_str() != agent_id.as_str())
+                        .map(|peer| expand_agent_id(peer, instance, group.count))
+                        .collect();
+                    let context = self.prompt_template_context(
+                        &expanded_id,
+                        instance,
+                        group.count,
+                        peer_ids,
+                        peer_inboxes,
+                        &worker_inboxes_rendered,
+                        &worker_instance_vars,
+                        wt_map
+                            .get(expanded_id.as_str())
+                            .or_else(|| wt_map.get(agent_id.as_str()))
+                            .copied(),
+                    );
+                    let worktree_prompt_path = agent
+                        .worktree_prompt_file
+                        .as_ref()
+                        .map(|file| self.dot_dir.join(file));
+                    if let Some(path) = &worktree_prompt_path {
+                        if !path.exists() {
+                            return Err(ConfigError::MissingPromptFile(path.clone()));
+                        }
+                    }
+
+                    for timer in &agent.timers {
+                        let prompt_path = self.dot_dir.join(&timer.prompt_file);
+                        if !prompt_path.exists() {
+                            return Err(ConfigError::MissingPromptFile(prompt_path));
+                        }
+
+                        timers.push(ResolvedTimer {
+                            agent_id: expanded_id.clone(),
+                            minutes: timer.minutes,
+                            prompt_path,
+                            interrupt: timer.interrupt,
+                            include_agents: timer.include_agents.clone(),
+                            template_context: context.clone(),
+                            worktree_prompt_path: worktree_prompt_path.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(timers)
     }
 
@@ -885,21 +1047,63 @@ pub struct ResolvedTimer {
     pub agent_id: String,
     pub minutes: u64,
     pub prompt_path: PathBuf,
-    pub project_root: String,
-    pub messages_dir: String,
     pub interrupt: bool,
     pub include_agents: Vec<String>,
+    template_context: PromptTemplateContext,
+    worktree_prompt_path: Option<PathBuf>,
 }
 
 impl ResolvedTimer {
+    pub fn new_basic(
+        agent_id: String,
+        minutes: u64,
+        prompt_path: PathBuf,
+        project_root: String,
+        messages_dir: String,
+        interrupt: bool,
+        include_agents: Vec<String>,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.clone(),
+            minutes,
+            prompt_path,
+            interrupt,
+            include_agents,
+            template_context: PromptTemplateContext {
+                project_root,
+                messages_dir,
+                agent_id,
+                instance_suffix: String::new(),
+                instance_index: "1".to_string(),
+                group_count: "1".to_string(),
+                peer_ids: String::new(),
+                peer_inboxes: String::new(),
+                worker_inboxes: String::new(),
+                worker_instance_vars: Vec::new(),
+                my_branch: String::new(),
+                other_branches: String::new(),
+                worktree_root: String::new(),
+            },
+            worktree_prompt_path: None,
+        }
+    }
+
     /// Read and render the prompt file. Called each time the timer fires
     /// so edits to the file take effect without an orchestrator restart.
     pub fn read_prompt(&self) -> Result<String, std::io::Error> {
         let raw = std::fs::read_to_string(&self.prompt_path)?;
-        Ok(raw
-            .replace("{{project_root}}", &self.project_root)
-            .replace("{{messages_dir}}", &self.messages_dir)
-            .replace("{{agent_id}}", &self.agent_id))
+        let worktree_prompt = match &self.worktree_prompt_path {
+            Some(path) => {
+                let raw_worktree_prompt = std::fs::read_to_string(path)?;
+                apply_prompt_template_variables(raw_worktree_prompt, &self.template_context)
+            }
+            None => String::new(),
+        };
+        Ok(render_prompt_template(
+            raw,
+            &self.template_context,
+            &worktree_prompt,
+        ))
     }
 }
 

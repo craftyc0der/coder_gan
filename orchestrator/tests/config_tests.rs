@@ -333,6 +333,34 @@ fn startup_prompts_substitutes_template_variables() {
 }
 
 #[test]
+fn startup_prompts_use_relative_paths_in_worktree_mode() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(
+        &dot_dir,
+        "coder.md",
+        "root={{project_root}} messages={{messages_dir}} worktree={{worktree_root}} id={{agent_id}}",
+    );
+    write_agents_toml(&dot_dir, &minimal_agents_toml("coder"));
+
+    let mut config = ProjectConfig::load(tmp.path()).unwrap();
+    config.worktree_feature = Some("feature-x".into());
+    config.worktrees = vec![orchestrator::worktree::AgentWorktree {
+        agent_id: "coder".into(),
+        branch: "feature-x/coder".into(),
+        worktree_path: tmp.path().join("fake-worktree"),
+    }];
+
+    let prompts = config.startup_prompts().unwrap();
+    let rendered = prompts.get("coder").unwrap();
+
+    assert!(rendered.contains("root=."));
+    assert!(rendered.contains("messages=.orchestrator/messages"));
+    assert!(rendered.contains("worktree=."));
+    assert!(rendered.contains("id=coder"));
+}
+
+#[test]
 fn startup_prompts_returns_missing_prompt_file() {
     let tmp = TempDir::new().unwrap();
     let dot_dir = make_dot_dir(tmp.path());
@@ -478,7 +506,11 @@ fn load_rejects_timer_with_invalid_include_agents() {
 fn resolved_timers_renders_template_variables() {
     let tmp = TempDir::new().unwrap();
     let dot_dir = make_dot_dir(tmp.path());
-    write_prompt(&dot_dir, "coder.md", "root={{project_root}} id={{agent_id}}");
+    write_prompt(
+        &dot_dir,
+        "coder.md",
+        "root={{project_root}} messages={{messages_dir}} id={{agent_id}} peer_ids={{peer_ids}} peer_inboxes={{peer_inboxes}} workers={{worker_inboxes}} branch={{my_branch}} others={{other_branches}} worktree={{worktree_root}}",
+    );
 
     let toml = r#"
         [[agents]]
@@ -500,7 +532,108 @@ fn resolved_timers_renders_template_variables() {
     assert_eq!(timers[0].minutes, 5);
     let prompt = timers[0].read_prompt().unwrap();
     assert!(prompt.contains("root="));
+    assert!(prompt.contains("messages="));
     assert!(prompt.contains("id=coder"));
+    assert!(prompt.contains("peer_ids="));
+    assert!(prompt.contains("peer_inboxes="));
+    assert!(prompt.contains("workers="));
+    assert!(prompt.contains("branch="));
+    assert!(prompt.contains("others="));
+    assert!(prompt.contains("worktree="));
+}
+
+#[test]
+fn resolved_timers_render_group_and_worktree_variables() {
+    let tmp = TempDir::new().unwrap();
+    let dot_dir = make_dot_dir(tmp.path());
+    write_prompt(
+        &dot_dir,
+        "coder.md",
+        concat!(
+            "id={{agent_id}} ",
+            "suffix={{instance_suffix}} ",
+            "idx={{instance_index}} ",
+            "count={{group_count}} ",
+            "peer_ids={{peer_ids}}\n",
+            "peer_inboxes={{peer_inboxes}}\n",
+            "workers={{worker_inboxes}}\n",
+            "w1={{worker_1_inboxes}}\n",
+            "w2={{worker_2_inboxes}}\n",
+            "branch={{my_branch}}\n",
+            "others={{other_branches}}\n",
+            "root={{project_root}} msgs={{messages_dir}} wt={{worktree_root}}\n",
+            "{{worktree_prompt}}"
+        ),
+    );
+    write_prompt(&dot_dir, "tester.md", "tester {{agent_id}}");
+    write_prompt(&dot_dir, "reviewer.md", "reviewer {{agent_id}}");
+    write_prompt(
+        &dot_dir,
+        "coder-worktree.md",
+        "appendix {{agent_id}} {{my_branch}} {{worktree_root}}",
+    );
+
+    let mut agents = make_group_agents();
+    agents[0].timers = vec![orchestrator::config::TimerEntry {
+        minutes: 5,
+        prompt_file: "prompts/coder.md".into(),
+        interrupt: false,
+        include_agents: vec![],
+    }];
+    agents[0].worktree_prompt_file = Some("prompts/coder-worktree.md".into());
+
+    let mut config = make_config_with_groups(&tmp, agents, vec![make_worker_group(2)]);
+    config.worktree_feature = Some("feature-x".into());
+    config.worktrees = vec![
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "coder-1".into(),
+            branch: "feature-x/coder-1".into(),
+            worktree_path: tmp.path().join("wt/coder-1"),
+        },
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "tester-1".into(),
+            branch: "feature-x/tester-1".into(),
+            worktree_path: tmp.path().join("wt/coder-1"),
+        },
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "coder-2".into(),
+            branch: "feature-x/coder-2".into(),
+            worktree_path: tmp.path().join("wt/coder-2"),
+        },
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "tester-2".into(),
+            branch: "feature-x/tester-2".into(),
+            worktree_path: tmp.path().join("wt/coder-2"),
+        },
+    ];
+
+    let timers = config.resolved_timers().unwrap();
+    assert_eq!(timers.len(), 2);
+
+    let coder_1 = timers.iter().find(|timer| timer.agent_id == "coder-1").unwrap();
+    let prompt_1 = coder_1.read_prompt().unwrap();
+    assert!(prompt_1.contains("id=coder-1"));
+    assert!(prompt_1.contains("suffix=-1"));
+    assert!(prompt_1.contains("idx=1"));
+    assert!(prompt_1.contains("count=2"));
+    assert!(prompt_1.contains("peer_ids=tester-1"));
+    assert!(prompt_1.contains("to_tester-1"));
+    assert!(prompt_1.contains("to_coder-1"));
+    assert!(prompt_1.contains("to_coder-2"));
+    assert!(prompt_1.contains("to_tester-2"));
+    assert!(prompt_1.contains("branch=feature-x/coder-1"));
+    assert!(prompt_1.contains("feature-x/tester-1"));
+    assert!(prompt_1.contains("root=. msgs=.orchestrator/messages wt=."));
+    assert!(prompt_1.contains("appendix coder-1 feature-x/coder-1 ."));
+
+    let coder_2 = timers.iter().find(|timer| timer.agent_id == "coder-2").unwrap();
+    let prompt_2 = coder_2.read_prompt().unwrap();
+    assert!(prompt_2.contains("id=coder-2"));
+    assert!(prompt_2.contains("suffix=-2"));
+    assert!(prompt_2.contains("idx=2"));
+    assert!(prompt_2.contains("peer_ids=tester-2"));
+    assert!(prompt_2.contains("branch=feature-x/coder-2"));
+    assert!(prompt_2.contains("appendix coder-2 feature-x/coder-2 ."));
 }
 
 // ---------------------------------------------------------------------------

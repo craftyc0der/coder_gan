@@ -171,6 +171,8 @@ pub struct MessageWatcher {
     seen_hashes: Arc<Mutex<HashSet<String>>>,
     queues: Arc<Mutex<HashMap<String, VecDeque<MessageMeta>>>>,
     injector: Arc<dyn InjectorOps>,
+    shared_dot_dir: Option<PathBuf>,
+    worktree_roots: Vec<PathBuf>,
 }
 
 impl MessageWatcher {
@@ -199,12 +201,26 @@ impl MessageWatcher {
             seen_hashes: Arc::new(Mutex::new(HashSet::new())),
             queues: Arc::new(Mutex::new(HashMap::new())),
             injector,
+            shared_dot_dir: None,
+            worktree_roots: Vec::new(),
         }
+    }
+
+    pub fn with_worktree_symlink_watch(
+        mut self,
+        shared_dot_dir: PathBuf,
+        worktree_roots: Vec<PathBuf>,
+    ) -> Self {
+        self.shared_dot_dir = Some(shared_dot_dir);
+        self.worktree_roots = worktree_roots;
+        self
     }
 
     /// Start watching all `messages/to_*` directories.
     /// This spawns a background tokio task and returns immediately.
     pub async fn start(self: Arc<Self>) {
+        self.start_worktree_symlink_watcher();
+
         // Use a std::sync channel so the notify callback (which runs on a
         // plain OS thread) can send without needing a tokio runtime handle.
         let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
@@ -249,6 +265,54 @@ impl MessageWatcher {
         let watcher = self.clone();
         tokio::spawn(async move {
             watcher.routing_loop(rx).await;
+        });
+    }
+
+    fn start_worktree_symlink_watcher(self: &Arc<Self>) {
+        let Some(shared_dot_dir) = self.shared_dot_dir.clone() else {
+            return;
+        };
+        if self.worktree_roots.is_empty() {
+            return;
+        }
+
+        let worktree_roots = self.worktree_roots.clone();
+        std::thread::spawn(move || {
+            for root in &worktree_roots {
+                let _ = crate::worktree::ensure_dot_orchestrator_symlink(&shared_dot_dir, root);
+            }
+
+            let callback_roots = worktree_roots.clone();
+            let callback_shared_dot_dir = shared_dot_dir.clone();
+
+            let mut watcher = notify::recommended_watcher(move |res: Result<NotifyEvent, _>| {
+                if let Ok(event) = res {
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+                            for path in event.paths {
+                                maybe_repair_worktree_dot_orchestrator(
+                                    &path,
+                                    &callback_shared_dot_dir,
+                                    &callback_roots,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .expect("failed to create worktree symlink watcher");
+
+            for root in &worktree_roots {
+                watcher
+                    .watch(root, RecursiveMode::NonRecursive)
+                    .expect("failed to watch worktree root");
+                println!("[watcher] watching worktree symlink in {}", root.display());
+            }
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
         });
     }
 
@@ -489,4 +553,41 @@ impl MessageWatcher {
             }
         }
     }
+}
+
+pub fn maybe_repair_worktree_dot_orchestrator(
+    changed_path: &Path,
+    shared_dot_dir: &Path,
+    worktree_roots: &[PathBuf],
+) -> bool {
+    for root in worktree_roots {
+        let dot_path = root.join(".orchestrator");
+        if changed_path == dot_path || changed_path == root || changed_path.starts_with(&dot_path) {
+            let metadata = match dot_path.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+                Err(err) => {
+                    eprintln!(
+                        "[watcher] failed to inspect .orchestrator path for {}: {err}",
+                        root.display()
+                    );
+                    return false;
+                }
+            };
+
+            if metadata.file_type().is_symlink() {
+                return false;
+            }
+
+            if let Err(err) = crate::worktree::ensure_dot_orchestrator_symlink(shared_dot_dir, root) {
+                eprintln!(
+                    "[watcher] failed to repair .orchestrator symlink for {}: {err}",
+                    root.display()
+                );
+            }
+            return true;
+        }
+    }
+
+    false
 }

@@ -152,6 +152,70 @@ pub fn create_worktree(
     Ok(())
 }
 
+fn remove_path_if_exists(path: &Path) -> Result<(), WorktreeError> {
+    if !path.exists() && path.symlink_metadata().is_err() {
+        return Ok(());
+    }
+
+    let metadata = path.symlink_metadata()?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std::fs::remove_file(path)?;
+    } else if metadata.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    }
+
+    Ok(())
+}
+
+fn symlink_points_to(path: &Path, expected_target: &Path) -> bool {
+    match std::fs::read_link(path) {
+        Ok(target) => target == expected_target,
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn symlink_path(source: &Path, dest: &Path) -> Result<(), WorktreeError> {
+    std::os::unix::fs::symlink(source, dest)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn symlink_path(_source: &Path, _dest: &Path) -> Result<(), WorktreeError> {
+    Err(WorktreeError::GitCommand {
+        step: "symlink .orchestrator".into(),
+        detail: "symlinks are not supported on this platform".into(),
+    })
+}
+
+pub fn ensure_dot_orchestrator_symlink(
+    source: &Path,
+    wt_path: &Path,
+) -> Result<(), WorktreeError> {
+    if !source.exists() {
+        return Ok(());
+    }
+
+    let dest = wt_path.join(".orchestrator");
+
+    let needs_repair = match dest.symlink_metadata() {
+        Ok(metadata) => !metadata.file_type().is_symlink() || !symlink_points_to(&dest, source),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(err) => return Err(WorktreeError::IoError(err)),
+    };
+
+    if needs_repair {
+        remove_path_if_exists(&dest)?;
+        symlink_path(source, &dest)?;
+        println!(
+            "[worktree] symlinked .orchestrator/ -> {}",
+            source.display()
+        );
+    }
+
+    Ok(())
+}
+
 /// Specification for a single worktree to create.
 ///
 /// A worktree can be shared by multiple agents (e.g. all members of a worker
@@ -188,27 +252,9 @@ pub fn setup_worktrees(
 
         create_worktree(project_root, &wt_path, &branch)?;
 
-        // Symlink .orchestrator/ into the worktree so agents share message
-        // queues, logs, and config with the main project.
-        let dot_orch_link = wt_path.join(".orchestrator");
-        let dot_orch_source = project_root.join(".orchestrator");
-        if !dot_orch_link.exists() && dot_orch_source.exists() {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&dot_orch_source, &dot_orch_link)?;
-                println!(
-                    "[worktree] symlinked .orchestrator/ -> {}",
-                    dot_orch_source.display()
-                );
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!(
-                    "[worktree] warning: cannot symlink .orchestrator/ on this platform; \
-                     agents in worktrees may not share message queues."
-                );
-            }
-        }
+        // Git worktrees do not bring along ignored files, so link the entire
+        // .orchestrator directory back to the main project.
+        ensure_dot_orchestrator_symlink(&project_root.join(".orchestrator"), &wt_path)?;
 
         // Create an AgentWorktree entry for every agent that shares this
         // worktree, all pointing at the same path and branch.
