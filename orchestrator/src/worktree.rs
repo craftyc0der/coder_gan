@@ -152,23 +152,39 @@ pub fn create_worktree(
     Ok(())
 }
 
-/// Set up worktrees for all agents. Returns the resolved worktree info per agent.
+/// Specification for a single worktree to create.
 ///
-/// Each agent gets its own worktree directory and branch. The `.orchestrator/`
-/// directory from the main project is symlinked into each worktree so agents
-/// share the same message queues and config.
+/// A worktree can be shared by multiple agents (e.g. all members of a worker
+/// group instance share one worktree directory and branch).
+#[derive(Debug, Clone)]
+pub struct WorktreeSpec {
+    /// Logical ID for the worktree (e.g. "reviewer", "worker-1").
+    /// Used for directory naming and default branch naming.
+    pub worktree_id: String,
+    /// Agent IDs (potentially expanded) that will share this worktree.
+    pub agent_ids: Vec<String>,
+    /// Optional branch pattern override (supports `{{branch}}` template).
+    pub branch_override: Option<String>,
+}
+
+/// Set up worktrees from specs. Returns the resolved worktree info per agent.
+///
+/// Each spec creates one worktree directory. All agents listed in a spec share
+/// the same directory and branch. The `.orchestrator/` directory from the main
+/// project is symlinked into each worktree so agents share message queues and
+/// config.
 pub fn setup_worktrees(
     project_root: &Path,
     feature_name: &str,
-    agents: &[(String, Option<String>)], // (agent_id, optional branch override)
+    specs: &[WorktreeSpec],
 ) -> Result<Vec<AgentWorktree>, WorktreeError> {
     verify_git_repo(project_root)?;
 
     let mut results = Vec::new();
 
-    for (agent_id, agent_branch) in agents {
-        let branch = resolve_branch(feature_name, agent_id, agent_branch.as_deref());
-        let wt_path = worktree_path(project_root, feature_name, agent_id);
+    for spec in specs {
+        let branch = resolve_branch(feature_name, &spec.worktree_id, spec.branch_override.as_deref());
+        let wt_path = worktree_path(project_root, feature_name, &spec.worktree_id);
 
         create_worktree(project_root, &wt_path, &branch)?;
 
@@ -194,11 +210,15 @@ pub fn setup_worktrees(
             }
         }
 
-        results.push(AgentWorktree {
-            agent_id: agent_id.clone(),
-            branch,
-            worktree_path: wt_path,
-        });
+        // Create an AgentWorktree entry for every agent that shares this
+        // worktree, all pointing at the same path and branch.
+        for agent_id in &spec.agent_ids {
+            results.push(AgentWorktree {
+                agent_id: agent_id.clone(),
+                branch: branch.clone(),
+                worktree_path: wt_path.clone(),
+            });
+        }
     }
 
     Ok(results)

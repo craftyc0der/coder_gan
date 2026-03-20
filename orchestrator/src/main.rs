@@ -132,17 +132,54 @@ async fn main() {
                 };
                 config.worktree_feature = Some(feature_name.clone());
 
-                // Collect agent worktree specs: (agent_id, optional branch override)
-                let agent_specs: Vec<(String, Option<String>)> = config
-                    .agents
+                // Build worktree specs: one per standalone agent, one per
+                // group instance (all agents in a group share a worktree).
+                let grouped_ids: std::collections::HashSet<&str> = config
+                    .worker_groups
                     .iter()
-                    .map(|a| (a.id.clone(), a.branch.clone()))
+                    .flat_map(|g| g.agents.iter().map(|a| a.as_str()))
                     .collect();
+
+                let mut specs: Vec<orchestrator::worktree::WorktreeSpec> = Vec::new();
+
+                // Standalone agents: one worktree each
+                for a in &config.agents {
+                    if grouped_ids.contains(a.id.as_str()) {
+                        continue;
+                    }
+                    specs.push(orchestrator::worktree::WorktreeSpec {
+                        worktree_id: a.id.clone(),
+                        agent_ids: vec![a.id.clone()],
+                        branch_override: a.branch.clone(),
+                    });
+                }
+
+                // Worker groups: one worktree per group instance, shared by
+                // all agents in that instance.
+                for group in &config.worker_groups {
+                    for instance in 1..=group.count {
+                        let wt_id = orchestrator::config::expand_agent_id(
+                            &group.id, instance, group.count,
+                        );
+                        let agent_ids: Vec<String> = group
+                            .agents
+                            .iter()
+                            .map(|a| {
+                                orchestrator::config::expand_agent_id(a, instance, group.count)
+                            })
+                            .collect();
+                        specs.push(orchestrator::worktree::WorktreeSpec {
+                            worktree_id: wt_id,
+                            agent_ids,
+                            branch_override: None,
+                        });
+                    }
+                }
 
                 match orchestrator::worktree::setup_worktrees(
                     &config.project_root,
                     &feature_name,
-                    &agent_specs,
+                    &specs,
                 ) {
                     Ok(worktrees) => {
                         config.worktrees = worktrees;
