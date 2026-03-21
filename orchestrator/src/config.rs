@@ -1019,7 +1019,12 @@ impl ProjectConfig {
     /// `<project>-<feature>-<agent>` instead of `<project>-<agent>`.
     pub fn tmux_session_for(&self, agent_id: &str) -> String {
         match &self.worktree_feature {
-            Some(feature) => format!("{}-{}-{}", self.project_name, feature, agent_id),
+            Some(feature) => format!(
+                "{}-{}-{}",
+                self.project_name,
+                sanitize_tmux_component(feature),
+                agent_id
+            ),
             None => format!("{}-{}", self.project_name, agent_id),
         }
     }
@@ -1029,7 +1034,7 @@ impl ProjectConfig {
     /// When worktree mode is active, the feature name is included.
     pub fn group_session_for(&self, group_id: &str, instance: u32, total: u32) -> String {
         let base = match &self.worktree_feature {
-            Some(feature) => format!("{}-{}", self.project_name, feature),
+            Some(feature) => format!("{}-{}", self.project_name, sanitize_tmux_component(feature)),
             None => self.project_name.clone(),
         };
         if total == 1 {
@@ -1119,6 +1124,10 @@ fn sanitize_project_name(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("project");
 
+    sanitize_tmux_component(raw)
+}
+
+fn sanitize_tmux_component(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
         .map(|c| {

@@ -824,7 +824,10 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
     let spawned = injector.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 2);
     assert_eq!(spawned[0].0, "testproject-worker");
-    assert_eq!(spawned[0].1, "claude");
+    assert_eq!(
+        spawned[0].1,
+        format!("cd {} && claude", worktree_dir.display())
+    );
     assert_eq!(spawned[1].0, "testproject-worker");
     assert_eq!(spawned[1].1, "codex");
 

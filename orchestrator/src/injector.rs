@@ -38,6 +38,23 @@ impl std::fmt::Display for InjectionError {
 // tmux primitives
 // ---------------------------------------------------------------------------
 
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn wrap_for_tmux_shell(cmd: &str) -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    format!(
+        "exec {} -l -c {}",
+        shell_quote(&shell),
+        shell_quote(cmd)
+    )
+}
+
 /// Check if a tmux session exists.
 pub fn has_session(session: &str) -> bool {
     Command::new("tmux")
@@ -52,6 +69,8 @@ pub fn has_session(session: &str) -> bool {
 /// Returns the terminal handle on success, or `None` if the handle
 /// could not be determined (e.g. headless mode or unsupported OS).
 pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
+    let wrapped_cmd = wrap_for_tmux_shell(cmd);
+
     // Create the detached session
     let status = Command::new("tmux")
         .args([
@@ -63,7 +82,7 @@ pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionE
             "200",
             "-y",
             "50",
-            cmd,
+            &wrapped_cmd,
         ])
         .status()
         .map_err(|e| InjectionError::TmuxCommand {
@@ -154,9 +173,11 @@ pub fn spawn_group_session(
         });
     }
 
+    let wrapped_first_cmd = wrap_for_tmux_shell(cmds[0]);
+
     // Create the session with the first command
     let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", session, "-x", "220", "-y", "50", cmds[0]])
+        .args(["new-session", "-d", "-s", session, "-x", "220", "-y", "50", &wrapped_first_cmd])
         .status()
         .map_err(|e| InjectionError::TmuxCommand {
             step: "new-session".into(),
@@ -175,8 +196,9 @@ pub fn spawn_group_session(
         SplitDirection::Vertical => "-v",   // top|bottom
     };
     for cmd in cmds.iter().skip(1) {
+        let wrapped_cmd = wrap_for_tmux_shell(cmd);
         let status = Command::new("tmux")
-            .args(["split-window", split_flag, "-t", session, cmd])
+            .args(["split-window", split_flag, "-t", session, &wrapped_cmd])
             .status()
             .map_err(|e| InjectionError::TmuxCommand {
                 step: "split-window".into(),
@@ -519,8 +541,9 @@ pub fn kill_session(session: &str) {
 /// Kill the running process in the first pane of a tmux session and restart
 /// it with a new command. The session and any attached terminals stay alive.
 pub fn respawn_pane(session: &str, cmd: &str) -> Result<(), InjectionError> {
+    let wrapped_cmd = wrap_for_tmux_shell(cmd);
     let status = Command::new("tmux")
-        .args(["respawn-pane", "-k", "-t", session, cmd])
+        .args(["respawn-pane", "-k", "-t", session, &wrapped_cmd])
         .status()
         .map_err(|e| InjectionError::TmuxCommand {
             step: "respawn-pane".into(),
@@ -825,5 +848,19 @@ impl InjectorOps for RealInjector {
         keys: &'a InterruptKeys,
     ) -> Pin<Box<dyn Future<Output = Result<(), InjectionError>> + Send + 'a>> {
         Box::pin(inject_interrupt(session, text, keys))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_for_tmux_shell;
+
+    #[test]
+    fn wrap_for_tmux_shell_uses_login_shell_and_quotes_command() {
+        let wrapped = wrap_for_tmux_shell("cd '/tmp/a b' && codex");
+
+        assert!(wrapped.contains(" -l -c "));
+        assert!(wrapped.contains("codex"));
+        assert!(wrapped.contains("cd '"));
     }
 }

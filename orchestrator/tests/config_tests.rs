@@ -386,6 +386,17 @@ fn tmux_session_for_uses_project_name_and_agent_id() {
 }
 
 #[test]
+fn tmux_session_for_sanitizes_feature_names_for_tmux() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = make_config(&tmp, make_agents());
+
+    config.worktree_feature = Some("JOM/PR-1065".into());
+
+    let session = config.tmux_session_for("reviewer");
+    assert_eq!(session, "testproject-JOM-PR-1065-reviewer");
+}
+
+#[test]
 fn agent_configs_resolve_inbox_and_allowed_write_dirs() {
     let tmp = TempDir::new().unwrap();
     let config = make_config(&tmp, make_agents());
@@ -755,6 +766,21 @@ fn agent_configs_with_group_count_two_expands_ids() {
     assert_eq!(tester2.tmux_target, "testproject-worker-2:0.1");
     assert_eq!(tester2.inbox_dir, config.messages_dir.join("to_tester-2"));
     assert_eq!(tester2.cli_command, "codex");
+}
+
+#[test]
+fn group_session_for_sanitizes_feature_names_for_tmux() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = make_config_with_groups(
+        &tmp,
+        make_group_agents(),
+        vec![make_worker_group(2)],
+    );
+
+    config.worktree_feature = Some("JOM/PR-1065".into());
+
+    assert_eq!(config.group_session_for("worker", 1, 2), "testproject-JOM-PR-1065-worker-1");
+    assert_eq!(config.group_session_for("worker", 2, 2), "testproject-JOM-PR-1065-worker-2");
 }
 
 // ---------------------------------------------------------------------------
