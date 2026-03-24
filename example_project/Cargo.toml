@@ -1,0 +1,5 @@
+[package]
+name = "unit_converter"
+version = "0.1.0"
+edition = "2021"
+description = "A simple unit converter — canonical demo for coder_gan"

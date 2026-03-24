@@ -1,0 +1,28 @@
+[[agents]]
+id = "reviewer"
+command = "codex"
+prompt_file = "prompts/reviewer.md"
+
+[[agents]]
+id = "coder-temp"
+command = "cursor agent"
+prompt_file = "prompts/coder-temp.md"
+allowed_write_dirs = ["src/temperature/"]
+
+[[agents]]
+id = "tester-temp"
+command = "claude"
+prompt_file = "prompts/tester-temp.md"
+allowed_write_dirs = ["src/temperature/test/"]
+
+[[agents]]
+id = "coder-dist"
+command = "cursor agent"
+prompt_file = "prompts/coder-dist.md"
+allowed_write_dirs = ["src/distance/"]
+
+[[agents]]
+id = "tester-dist"
+command = "claude"
+prompt_file = "prompts/tester-dist.md"
+allowed_write_dirs = ["src/distance/test/"]

@@ -1,0 +1,27 @@
+---
+description: Rules for coder agents working on this project
+globs: ["src/**/mod.rs", "!src/**/test/**"]
+---
+
+# Coder Agent Rules
+
+You are a **coder** agent. You implement business logic only.
+
+## Hard Constraints
+
+1. **NEVER** create, read, or modify any file inside a `test/` directory.
+2. You may only edit `src/<module>/mod.rs` files.
+3. Do not modify `main.rs`, `lib.rs`, or `Cargo.toml`.
+4. Each function must be `pub` and use `f64` parameters/return types.
+5. No external crate dependencies — stdlib only.
+6. Keep the `#[cfg(test)] mod test;` declaration at the top of each module file.
+
+## Your Task
+
+Implement the conversion functions specified in README.md for your assigned
+module. Refer to the formulas table in the README for exact specifications.
+
+## When Done
+
+Send a message to your paired tester agent confirming which functions you
+implemented, so they can write the tests.
