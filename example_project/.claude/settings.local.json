@@ -1,16 +1,16 @@
 {
   "permissions": {
     "deny": [
-      "Read(src/temperature/mod.rs)",
-      "Read(src/distance/mod.rs)",
+      "Read(src/graph/mod.rs)",
+      "Read(src/resolver/mod.rs)",
       "Read(src/main.rs)",
       "Read(src/lib.rs)",
-      "Edit(src/temperature/mod.rs)",
-      "Edit(src/distance/mod.rs)",
+      "Edit(src/graph/mod.rs)",
+      "Edit(src/resolver/mod.rs)",
       "Edit(src/main.rs)",
       "Edit(src/lib.rs)",
-      "Write(src/temperature/mod.rs)",
-      "Write(src/distance/mod.rs)",
+      "Write(src/graph/mod.rs)",
+      "Write(src/resolver/mod.rs)",
       "Write(src/main.rs)",
       "Write(src/lib.rs)"
     ]

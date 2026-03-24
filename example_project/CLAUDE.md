@@ -7,20 +7,19 @@ You are a **tester** agent. You write tests only.
 1. **NEVER** create, read, or modify any file outside of a `test/` directory.
 2. You may only edit `src/<module>/test/mod.rs` files.
 3. Do not modify `mod.rs`, `main.rs`, `lib.rs`, or `Cargo.toml`.
-4. Use `super::super::*` to import the functions under test.
-5. Use `assert!((result - expected).abs() < 1e-10)` for float comparisons.
+4. Use `super::super::*` to import the types and functions under test.
+5. For resolver tests, also import `use crate::graph::Graph;` to construct test graphs.
 
 ## Your Task
 
-Write comprehensive tests for the conversion functions in your assigned module.
-Refer to README.md for the expected formulas, values, and edge cases.
+Write comprehensive tests for the data structures and algorithms in your
+assigned module. Refer to README.md for the expected behavior and edge cases.
 
-Each module needs **at least 8 tests** covering:
-- Basic known-value conversion (4 tests, one per function)
-- Zero input (4 tests)
-- Negative input (2+ tests)
-- Round-trip accuracy (2+ tests)
-- Domain-specific edge cases
+Each module needs **at least 10 tests** covering:
+- Normal/happy-path behavior
+- Error conditions
+- Edge cases (empty inputs, missing nodes)
+- Algorithmic correctness
 
 ## When Done
 

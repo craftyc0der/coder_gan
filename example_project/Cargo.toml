@@ -1,5 +1,5 @@
 [package]
-name = "unit_converter"
+name = "dep_graph"
 version = "0.1.0"
 edition = "2021"
-description = "A simple unit converter — canonical demo for coder_gan"
+description = "A dependency graph resolver — canonical demo for coder_gan"

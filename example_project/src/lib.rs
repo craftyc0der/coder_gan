@@ -1,2 +1,2 @@
-pub mod temperature;
-pub mod distance;
+pub mod graph;
+pub mod resolver;

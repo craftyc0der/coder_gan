@@ -1,50 +1,70 @@
-# Unit Converter Library
+# Dependency Graph Resolver
 
-A Rust library and CLI tool that converts between common units of measurement.
+A Rust library and CLI tool for building and resolving dependency graphs.
 This project serves as the canonical demo for the **coder_gan** multi-agent
 orchestration system.
 
 ## Problem Statement
 
-Build a unit converter library with **two independent modules**:
+Build a dependency graph library with **two independent modules**:
 
-### Module 1: Temperature (`src/temperature/`)
+### Module 1: Graph (`src/graph/`)
 
-Implement the following pure functions in `src/temperature/mod.rs`:
+Implement the `Graph` data structure in `src/graph/mod.rs`:
 
-| Function | Formula | Example |
+| Method | Description |
+|---|---|
+| `Graph::new() -> Graph` | Create an empty graph |
+| `Graph::add_node(&mut self, name: &str)` | Add a node (idempotent) |
+| `Graph::add_edge(&mut self, from: &str, to: &str) -> Result<(), GraphError>` | Add directed edge; both nodes must exist |
+| `Graph::neighbors(&self, name: &str) -> Result<Vec<String>, GraphError>` | Direct dependencies (outgoing edges) |
+| `Graph::has_node(&self, name: &str) -> bool` | Check if node exists |
+| `Graph::has_edge(&self, from: &str, to: &str) -> bool` | Check if edge exists |
+| `Graph::nodes(&self) -> Vec<String>` | All node names, sorted alphabetically |
+| `Graph::node_count(&self) -> usize` | Number of nodes |
+| `Graph::edge_count(&self) -> usize` | Total number of edges |
+
+**Error conditions:**
+- `add_edge` returns `NodeNotFound` if either node doesn't exist
+- `add_edge` returns `DuplicateEdge` if the edge already exists
+- `neighbors` returns `NodeNotFound` if the node doesn't exist
+
+**Edge semantics:** An edge from A to B means "A depends on B".
+
+### Module 2: Resolver (`src/resolver/`)
+
+Implement dependency resolution algorithms in `src/resolver/mod.rs`:
+
+| Function | Description | Algorithm |
 |---|---|---|
-| `celsius_to_fahrenheit(c: f64) -> f64` | F = C × 9/5 + 32 | 100.0 → 212.0 |
-| `fahrenheit_to_celsius(f: f64) -> f64` | C = (F − 32) × 5/9 | 32.0 → 0.0 |
-| `celsius_to_kelvin(c: f64) -> f64` | K = C + 273.15 | 0.0 → 273.15 |
-| `kelvin_to_celsius(k: f64) -> f64` | C = K − 273.15 | 373.15 → 100.0 |
+| `topological_sort(graph) -> Result<Vec<String>, ResolverError>` | Dependency-first ordering | Kahn's algorithm (BFS + in-degree) |
+| `detect_cycle(graph) -> Option<Vec<String>>` | Find a cycle if one exists | DFS with 3-color marking |
+| `transitive_deps(graph, node) -> Result<HashSet<String>, ResolverError>` | All direct + indirect deps | BFS/DFS traversal |
+| `install_order(graph) -> Result<Vec<String>, ResolverError>` | Leaves-first ordering | Reverse of topological sort |
 
-**Edge cases to handle:**
-- Absolute zero: `kelvin_to_celsius(0.0)` → `-273.15`
-- Negative temperatures are valid for Celsius and Fahrenheit
-- The crossover point: `-40` is the same in both Celsius and Fahrenheit
+**Topological sort example:**
+```
+Given: app→[api,cli], api→[core,utils], cli→[core,utils], core→[utils]
+Valid output: [utils, core, api, cli, app]  (dependencies before dependents)
+```
 
-### Module 2: Distance (`src/distance/`)
+**Cycle detection example:**
+```
+Given: a→b, b→c, c→a
+Returns: Some(["a", "b", "c", "a"])
+```
 
-Implement the following pure functions in `src/distance/mod.rs`:
-
-| Function | Formula | Example |
-|---|---|---|
-| `miles_to_km(mi: f64) -> f64` | km = mi × 1.60934 | 1.0 → 1.60934 |
-| `km_to_miles(km: f64) -> f64` | mi = km / 1.60934 | 1.60934 → 1.0 |
-| `meters_to_feet(m: f64) -> f64` | ft = m × 3.28084 | 1.0 → 3.28084 |
-| `feet_to_meters(ft: f64) -> f64` | m = ft / 3.28084 | 3.28084 → 1.0 |
-
-**Edge cases to handle:**
-- Zero converts to zero for all functions
-- Negative values should work (representing direction/debt, etc.)
-- Round-trip accuracy: `km_to_miles(miles_to_km(x))` ≈ `x` within f64 precision
+**Transitive deps example:**
+```
+Given: app→api, api→core, core→utils
+transitive_deps(app) = {api, core, utils}
+```
 
 ### CLI (`src/main.rs`)
 
-The `main.rs` should demonstrate all 8 conversion functions with sample values
-and print results to stdout. It is already provided as a skeleton — the agents
-just need to implement the module functions so it compiles and runs.
+The `main.rs` demonstrates all functionality with a sample package dependency
+graph. It is already provided — the agents just need to implement the module
+functions so it compiles and runs.
 
 ## Architecture
 
@@ -52,11 +72,11 @@ just need to implement the module functions so it compiles and runs.
 src/
 ├── main.rs                  # CLI demo (provided, do not modify)
 ├── lib.rs                   # Module declarations (provided, do not modify)
-├── temperature/
+├── graph/
 │   ├── mod.rs               # ← Coder Team 1 implements this
 │   └── test/
 │       └── mod.rs           # ← Tester Team 1 implements this
-└── distance/
+└── resolver/
     ├── mod.rs               # ← Coder Team 2 implements this
     └── test/
         └── mod.rs           # ← Tester Team 2 implements this
@@ -74,27 +94,28 @@ never inline in the implementation file.
 The demo is **complete** when:
 
 1. `cargo build` succeeds with no warnings
-2. `cargo test` passes all tests (minimum 8 tests per module = 16 total)
-3. `cargo run` prints correct sample conversions
+2. `cargo test` passes all tests (minimum 10 tests per module = 20 total)
+3. `cargo run` prints correct graph operations output
 
 ## Reviewer TODO List
 
 The reviewer agent (codex) should use this checklist to guide both teams:
 
 ### Phase 1 — Implementation (parallel)
-- [ ] **Team Temp**: Implement all 4 functions in `src/temperature/mod.rs`
-- [ ] **Team Dist**: Implement all 4 functions in `src/distance/mod.rs`
+- [ ] **Team Graph**: Implement all 9 methods on `Graph` in `src/graph/mod.rs`
+- [ ] **Team Resolver**: Implement all 4 functions in `src/resolver/mod.rs`
 - [ ] Verify: `cargo build` succeeds
 
 ### Phase 2 — Testing (parallel)
-- [ ] **Team Temp**: Write tests in `src/temperature/test/mod.rs` (≥8 tests)
-- [ ] **Team Dist**: Write tests in `src/distance/test/mod.rs` (≥8 tests)
+- [ ] **Team Graph**: Write tests in `src/graph/test/mod.rs` (>=10 tests)
+- [ ] **Team Resolver**: Write tests in `src/resolver/test/mod.rs` (>=10 tests)
 - [ ] Verify: `cargo test` passes all tests
 
 ### Phase 3 — Validation
 - [ ] Verify: `cargo run` prints correct output
 - [ ] Verify: No compiler warnings
-- [ ] Verify: Round-trip conversions are accurate (within 1e-10 tolerance)
+- [ ] Verify: Cycle detection works correctly
+- [ ] Verify: Topological sort produces valid orderings
 - [ ] Signal completion to orchestrator
 
 ## Quick Verification
@@ -104,5 +125,5 @@ Run these commands to confirm the demo is complete:
 ```bash
 cargo build 2>&1 | tail -1        # should show "Finished"
 cargo test  2>&1 | tail -1        # should show "test result: ok"
-cargo run                          # should print 8 conversions
+cargo run                          # should print graph operations
 ```

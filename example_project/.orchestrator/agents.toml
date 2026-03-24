@@ -4,25 +4,25 @@ command = "codex"
 prompt_file = "prompts/reviewer.md"
 
 [[agents]]
-id = "coder-temp"
+id = "coder-graph"
 command = "cursor agent"
-prompt_file = "prompts/coder-temp.md"
-allowed_write_dirs = ["src/temperature/"]
+prompt_file = "prompts/coder-graph.md"
+allowed_write_dirs = ["src/graph/"]
 
 [[agents]]
-id = "tester-temp"
+id = "tester-graph"
 command = "claude"
-prompt_file = "prompts/tester-temp.md"
-allowed_write_dirs = ["src/temperature/test/"]
+prompt_file = "prompts/tester-graph.md"
+allowed_write_dirs = ["src/graph/test/"]
 
 [[agents]]
-id = "coder-dist"
+id = "coder-resolver"
 command = "cursor agent"
-prompt_file = "prompts/coder-dist.md"
-allowed_write_dirs = ["src/distance/"]
+prompt_file = "prompts/coder-resolver.md"
+allowed_write_dirs = ["src/resolver/"]
 
 [[agents]]
-id = "tester-dist"
+id = "tester-resolver"
 command = "claude"
-prompt_file = "prompts/tester-dist.md"
-allowed_write_dirs = ["src/distance/test/"]
+prompt_file = "prompts/tester-resolver.md"
+allowed_write_dirs = ["src/resolver/test/"]

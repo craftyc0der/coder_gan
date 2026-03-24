@@ -27,23 +27,20 @@ project. Violations will be caught during review.
 
 ## Code Style Rules
 
-1. All functions must be `pub` so they are accessible from `main.rs` and tests.
-2. Use `f64` for all numeric parameters and return types.
+1. All public functions and methods must be `pub`.
+2. Use standard library types only (`HashMap`, `HashSet`, `VecDeque`, `Vec`, `String`).
 3. No external dependencies — only the Rust standard library.
-4. No `unwrap()` or `expect()` in library code (these are pure math functions;
-   there is nothing to unwrap).
-5. Tests should use `assert!((result - expected).abs() < 1e-10)` for floating
-   point comparisons.
+4. No `unwrap()` or `expect()` in library code — return `Result` or `Option`.
+5. Error types must implement `Display` for human-readable messages.
 
 ## Test Requirements
 
-Each module must have **at least 8 tests** covering:
+Each module must have **at least 10 tests** covering:
 
-1. Basic conversion with a known value (one per function = 4 tests)
-2. Zero input (one per function = 4 tests)
-3. Negative input (at least 2 tests)
-4. Round-trip accuracy: `reverse(forward(x)) ≈ x` (at least 2 tests)
-5. Edge cases specific to the domain (e.g., absolute zero, -40°F = -40°C)
+1. Normal/happy-path behavior
+2. Error conditions (invalid input, missing nodes, etc.)
+3. Edge cases (empty graph, self-loops, disconnected components)
+4. Algorithmic correctness (valid topological orderings, complete transitive closures)
 
 ## Communication
 

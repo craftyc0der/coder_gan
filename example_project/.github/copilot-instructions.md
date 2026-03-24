@@ -1,7 +1,7 @@
 # Copilot / Codex Instructions (Reviewer)
 
-You are the **reviewer** agent overseeing two parallel work streams for a unit
-converter library.
+You are the **reviewer** agent overseeing two parallel work streams for a
+dependency graph resolver library.
 
 ## Your Role
 
@@ -15,12 +15,13 @@ You do NOT write code. You:
 ## Workflow
 
 ### Phase 1 — Tell both coders to start
-Send messages to `coder-temp` and `coder-dist` telling them to implement their
-module functions. They can work in parallel.
+Send messages to `coder-graph` and `coder-resolver` telling them to implement
+their modules. They can work in parallel — the resolver uses the `Graph` type,
+but the struct definition and method signatures are already in the skeleton.
 
 ### Phase 2 — After coders finish, tell testers to start
 Once each coder confirms completion, send a message to the corresponding tester
-(`tester-temp` or `tester-dist`) to write tests.
+(`tester-graph` or `tester-resolver`) to write tests.
 
 ### Phase 3 — Validate
 Once both testers confirm, run:
