@@ -1306,24 +1306,24 @@ const DEFAULT_AGENTS_TOML: &str = r#"# Orchestrator agent configuration
 
 [[agents]]
 id = "coder"
-command = "claude"
+command = "cursor agent"
 prompt_file = "prompts/coder.md"
 worktree_prompt_file = "prompts/coder-worktree.md"
-allowed_write_dirs = ["src/"]
+allowed_write_dirs = ["orchestrator/src/"]
 
 [[agents]]
 id = "tester"
-command = "codex"
+command = "claude"
 prompt_file = "prompts/tester.md"
 worktree_prompt_file = "prompts/tester-worktree.md"
-allowed_write_dirs = ["tests/"]
+allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
-command = "copilot"
+command = "codex"
 prompt_file = "prompts/reviewer.md"
 worktree_prompt_file = "prompts/reviewer-worktree.md"
-allowed_write_dirs = ["review/"]
+allowed_write_dirs = ["/"]
 
 # Re-inject the full reviewer prompt every 30 minutes to prevent context drift
 [[agents.timers]]
@@ -1344,7 +1344,7 @@ include_agents = ["coder", "tester"]
 id = "worker"
 agents = ["coder", "tester"]
 layout = "horizontal"
-count = 1
+count = 2
 "#;
 
 const DEFAULT_CODER_PROMPT: &str = r#"You are the CODER agent in a multi-agent coding system.
@@ -1357,7 +1357,7 @@ YOUR AGENT ID: {{agent_id}}
 You are responsible for writing implementation code.
 
 WRITE TO: {{project_root}}/src/
-DO NOT WRITE TO: tests/ or review/
+DO NOT WRITE TO: {{project_root}}/**/tests/
 
 === HOW TO WORK WITH THE TESTER ===
 
@@ -1377,7 +1377,7 @@ details. All context the tester needs should be included in your messages.
 Example message to the tester:
 
 I've implemented the `parse_config(path: &str) -> Result<Config, ConfigError>`
-function in src/config.rs. It reads a TOML file and returns a Config struct.
+function in orchestrator/src/config.rs. It reads a TOML file and returns a Config struct.
 
 Please write tests that verify:
 
@@ -1444,8 +1444,8 @@ You are responsible for writing tests that verify the implementation code works
 correctly. You write tests based on API definitions and behavior descriptions
 you receive from the coder — NOT by reading the source code directly.
 
-WRITE TO: {{project_root}}/tests/
-DO NOT WRITE TO: src/
+WRITE TO: {{project_root}}/**/tests/
+DO NOT WRITE TO: {{project_root}}/src/
 
 === HOW YOU RECEIVE WORK ===
 
@@ -1542,6 +1542,8 @@ review notes or store artifacts in the source tree.
 
 Your responses are delivered via messages to the requesting agents — there is
 no need to write review documents to disk unless explicitly asked to do so.
+
+If you do need to make code changes, you may work anywhere in the project.
 
 === HOW DISPUTES WORK ===
 

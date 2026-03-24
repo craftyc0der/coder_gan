@@ -1,0 +1,81 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(ls)",
+      "Shell(true)",
+      "Shell(cd)",
+      "Shell(cat)",
+      "Shell(git:diff*)",
+      "Shell(echo)",
+      "Shell(find)",
+      "Shell(sort)",
+      "Shell(diff)",
+      "Shell(mkdir)",
+      "Shell(rg)",
+      "Shell(cargo:build*)",
+      "Shell(cargo:test*)",
+      "Shell(cargo:run*)",
+      "Shell(cargo:fmt*)",
+      "Shell(cargo:clippy*)",
+      "Shell(cargo:audit*)",
+      "Shell(cargo:watch*)",
+      "Shell(cargo:check*)",
+      "Shell(cargo:doc*)",
+      "Shell(rustfmt)",
+      "Shell(sleep)",
+      "Shell(tail)"
+    ],
+    "deny": [
+      "Read(**/tests/**)",
+      "Edit(**/tests/**)",
+      "Write(**/tests/**)"
+    ]
+  },
+  "version": 1,
+  "editor": {
+    "vimMode": false
+  },
+  "model": {
+    "modelId": "claude-4.6-opus-high-thinking",
+    "displayModelId": "claude-4.6-opus-high-thinking",
+    "displayName": "Opus 4.6 1M Thinking",
+    "displayNameShort": "Opus 4.6 1M Thinking",
+    "aliases": [],
+    "maxMode": false
+  },
+  "hasChangedDefaultModel": false,
+  "maxMode": false,
+  "modelParameters": {
+    "claude-4.5-opus-high-thinking": [],
+    "claude-4.6-opus-high-thinking": []
+  },
+  "selectedModel": {
+    "modelId": "claude-4.6-opus-high-thinking",
+    "parameters": []
+  },
+  "privacyCache": {
+    "ghostMode": true,
+    "privacyMode": 2,
+    "updatedAt": 1774363856368
+  },
+  "authInfo": {
+    "email": "joshua.oster-morris@prometheus.co",
+    "displayName": "Joshua Oster-Morris",
+    "teamId": 12580758,
+    "teamName": "Prometheus",
+    "userId": 329486798,
+    "authId": "auth0|user_01KJBK0M68Q704P6YN7HMKJ5DM"
+  },
+  "network": {
+    "useHttp1ForAgent": false
+  },
+  "approvalMode": "allowlist",
+  "sandbox": {
+    "mode": "disabled",
+    "networkAccess": "user_config_with_defaults"
+  },
+  "attribution": {
+    "attributeCommitsToAgent": true,
+    "attributePRsToAgent": true
+  }
+}

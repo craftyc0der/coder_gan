@@ -269,10 +269,23 @@ fn init_project_creates_expected_dirs_and_files() {
         dot.join("prompts/coder.md"),
         dot.join("prompts/tester.md"),
         dot.join("prompts/reviewer.md"),
+        dot.join("prompts/reviewer_status_check.md"),
+        dot.join("prompts/coder-worktree.md"),
+        dot.join("prompts/tester-worktree.md"),
+        dot.join("prompts/reviewer-worktree.md"),
     ];
     for file in expected_files {
         assert!(file.is_file(), "expected file: {}", file.display());
     }
+
+    let agents_toml = std::fs::read_to_string(dot.join("agents.toml")).unwrap();
+    assert!(agents_toml.contains("command = \"cursor agent\""));
+    assert!(agents_toml.contains("command = \"claude\""));
+    assert!(agents_toml.contains("command = \"codex\""));
+    assert!(agents_toml.contains("allowed_write_dirs = [\"orchestrator/src/\"]"));
+    assert!(agents_toml.contains("allowed_write_dirs = [\"orchestrator/tests/\"]"));
+    assert!(agents_toml.contains("allowed_write_dirs = [\"/\"]"));
+    assert!(agents_toml.contains("count = 2"));
 }
 
 #[test]

@@ -12,14 +12,14 @@ allowed_write_dirs = ["orchestrator/src/"]
 
 [[agents]]
 id = "tester"
-command = "codex"
+command = "claude"
 prompt_file = "prompts/tester.md"
 worktree_prompt_file = "prompts/tester-worktree.md"
 allowed_write_dirs = ["orchestrator/tests/"]
 
 [[agents]]
 id = "reviewer"
-command = "copilot"
+command = "codex"
 prompt_file = "prompts/reviewer.md"
 worktree_prompt_file = "prompts/reviewer-worktree.md"
 allowed_write_dirs = ["/"]

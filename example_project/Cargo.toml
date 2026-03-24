@@ -1,0 +1,5 @@
+[package]
+name = "dep_graph"
+version = "0.1.0"
+edition = "2021"
+description = "A dependency graph resolver — canonical demo for coder_gan"
