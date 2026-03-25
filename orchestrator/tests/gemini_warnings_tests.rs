@@ -11,6 +11,7 @@ fn agent(id: &str, command: &str) -> AgentEntry {
         timers: vec![],
         branch: None,
         worktree_prompt_file: None,
+        terminal: None,
     }
 }
 
