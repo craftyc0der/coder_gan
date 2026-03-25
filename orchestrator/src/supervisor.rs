@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
@@ -279,13 +280,15 @@ impl AgentState {
 #[derive(Clone)]
 pub struct Registry {
     pub agents: Arc<Mutex<HashMap<String, AgentState>>>,
-    configs: Arc<HashMap<String, AgentConfig>>,
+    pub configs: Arc<HashMap<String, AgentConfig>>,
     startup_prompts: Arc<Mutex<HashMap<String, String>>>,
     worker_groups: Arc<Mutex<Vec<WorkerGroupConfig>>>,
     state_path: PathBuf,
     log_dir: PathBuf,
     logger: Arc<Logger>,
     injector: Arc<dyn InjectorOps>,
+    /// When true, the watcher stops routing messages and timers stop firing.
+    paused: Arc<AtomicBool>,
 }
 
 impl Registry {
@@ -318,6 +321,51 @@ impl Registry {
             log_dir,
             logger,
             injector,
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Returns true if the orchestrator is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Set the paused flag. When paused, the watcher queues messages instead
+    /// of routing them and the timer loop skips firing.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Return a reference to the shared paused flag for use by the watcher.
+    pub fn paused_flag(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
+    }
+
+    /// Re-read prompt files from disk and re-inject them into all agents.
+    pub async fn resend_system_prompts(&self, new_prompts: &HashMap<String, String>) {
+        // Update stored prompts
+        {
+            let mut stored = self.startup_prompts.lock().await;
+            *stored = new_prompts.clone();
+        }
+
+        let agents = self.agents.lock().await;
+        for (id, state) in agents.iter() {
+            if state.status == AgentStatus::Dead || state.status == AgentStatus::Degraded {
+                continue;
+            }
+            if let Some(prompt) = new_prompts.get(id) {
+                let target = state.effective_target().to_string();
+                // Interrupt the current generation first
+                if let Some(config) = self.configs.get(id) {
+                    let keys = InterruptKeys::for_command(&config.cli_command);
+                    if let Err(e) = self.injector.inject_interrupt(&target, prompt, &keys).await {
+                        eprintln!("[menu] failed to resend prompt for {id}: {e}");
+                    } else {
+                        println!("[menu] resent system prompt for {id}");
+                    }
+                }
+            }
         }
     }
 
@@ -1127,6 +1175,35 @@ impl Registry {
         });
     }
 
+    /// Spawn a single worker group and inject its startup prompts.
+    /// Used by the menu to scale teams up.
+    pub async fn spawn_and_prompt_group(
+        &self,
+        group: &WorkerGroupConfig,
+        prompts: &HashMap<String, String>,
+    ) {
+        // Register configs for new agents
+        // Note: configs is Arc<HashMap> and immutable, so new agents spawned
+        // via scaling won't be in it. We handle this by passing config directly.
+
+        self.spawn_group(group).await;
+
+        // Wait for CLI tools to boot
+        sleep(Duration::from_secs(AGENT_INIT_DELAY_SECS)).await;
+
+        // Inject prompts
+        for member in &group.members {
+            if let Some(prompt) = prompts.get(&member.agent_id) {
+                if let Err(e) = self.injector.inject(&member.tmux_target, prompt).await {
+                    eprintln!(
+                        "[supervisor] failed to inject startup prompt for {}: {e}",
+                        member.agent_id
+                    );
+                }
+            }
+        }
+    }
+
     /// Kill all agent tmux sessions and close their terminal windows.
     pub async fn kill_all(&self) {
         let agents = self.agents.lock().await;
@@ -1231,6 +1308,11 @@ impl Registry {
             tick.tick().await;
 
             let now = Instant::now();
+
+            // Skip firing timers when paused
+            if self.is_paused() {
+                continue;
+            }
 
             for (i, timer) in timers.iter().enumerate() {
                 let interval_dur = Duration::from_secs(timer.minutes * 60);

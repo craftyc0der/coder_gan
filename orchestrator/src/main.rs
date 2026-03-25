@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use orchestrator::config::{self as config, ProjectConfig};
+use orchestrator::menu;
 #[cfg(feature = "slack")]
 use orchestrator::config::{AgentType, SlackConfig};
 use orchestrator::injector;
@@ -428,13 +429,15 @@ async fn run_orchestrator(config: ProjectConfig) {
         logger.clone(),
     );
 
-    println!("Orchestrator running. Press Ctrl+C to stop.");
-    println!();
+    println!("Orchestrator running.\n");
 
-    // Wait for SIGINT/SIGTERM
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to listen for ctrl+c");
+    // Run the interactive CLI menu (blocks until user quits or Ctrl+C)
+    let menu_registry = registry.clone();
+    let menu_logger = logger.clone();
+    tokio::select! {
+        _ = menu::run_menu(menu_registry, menu_logger, &config) => {},
+        _ = tokio::signal::ctrl_c() => {},
+    }
 
     println!("\nShutting down...");
     health_handle.abort();

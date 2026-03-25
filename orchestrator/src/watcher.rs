@@ -173,6 +173,9 @@ pub struct MessageWatcher {
     injector: Arc<dyn InjectorOps>,
     shared_dot_dir: Option<PathBuf>,
     worktree_roots: Vec<PathBuf>,
+    /// Shared pause flag from the Registry. When true, incoming messages are
+    /// queued but not routed to tmux sessions.
+    paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MessageWatcher {
@@ -192,6 +195,7 @@ impl MessageWatcher {
     ) -> Self {
         let processed_dir = messages_dir.join("processed");
         let dead_letter_dir = messages_dir.join("dead_letter");
+        let paused = registry.paused_flag();
         MessageWatcher {
             registry,
             logger,
@@ -203,6 +207,7 @@ impl MessageWatcher {
             injector,
             shared_dot_dir: None,
             worktree_roots: Vec::new(),
+            paused,
         }
     }
 
@@ -361,6 +366,20 @@ impl MessageWatcher {
                 recipient: meta.recipient.clone(),
                 topic: meta.topic.clone(),
             });
+
+            // When paused, queue all messages instead of routing
+            if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
+                println!(
+                    "[watcher] paused: queuing message for {} ({})",
+                    meta.recipient, meta.filename
+                );
+                let mut queues = self.queues.lock().await;
+                queues
+                    .entry(meta.recipient.clone())
+                    .or_default()
+                    .push_back(meta);
+                continue;
+            }
 
             // Backpressure: queue if inbox is overloaded
             let inbox_count = self.count_inbox(&meta.recipient).await;
@@ -538,6 +557,10 @@ impl MessageWatcher {
     }
 
     async fn drain_queues(&self) {
+        // Don't drain while paused
+        if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         let mut queues = self.queues.lock().await;
         let recipients: Vec<String> = queues.keys().cloned().collect();
         for recipient in recipients {
