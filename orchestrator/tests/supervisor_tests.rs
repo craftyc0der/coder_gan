@@ -94,7 +94,7 @@ impl InjectorOps for MockInjector {
         self.killed.lock().unwrap().push(session.to_string());
     }
 
-    fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
+    fn spawn_session(&self, session: &str, cmd: &str, _terminal: &orchestrator::config::TerminalPreference) -> Result<Option<u32>, InjectionError> {
         self.spawned
             .lock()
             .unwrap()
@@ -174,6 +174,7 @@ impl InjectorOps for MockInjector {
         session: &str,
         cmds: &[&str],
         _layout: &orchestrator::config::SplitDirection,
+        _terminal: &orchestrator::config::TerminalPreference,
     ) -> Result<Option<u32>, InjectionError> {
         for cmd in cmds {
             self.spawned.lock().unwrap().push((session.to_string(), cmd.to_string()));
@@ -197,6 +198,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             inbox_dir: messages.join("to_coder"),
             allowed_write_dirs: vec![root.join("src/")],
             working_dir: None,
+            terminal: Default::default(),
         },
         AgentConfig {
             agent_id: "tester".into(),
@@ -206,6 +208,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             inbox_dir: messages.join("to_tester"),
             allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
+            terminal: Default::default(),
         },
     ]
 }
@@ -638,6 +641,7 @@ async fn session_for_grouped_agent_returns_pane_target() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -647,6 +651,7 @@ async fn session_for_grouped_agent_returns_pane_target() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -783,6 +788,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -792,6 +798,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -854,6 +861,7 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -863,6 +871,7 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -915,6 +924,7 @@ async fn kill_all_deduplicates_shared_sessions() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -924,6 +934,7 @@ async fn kill_all_deduplicates_shared_sessions() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -973,6 +984,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -982,6 +994,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1095,6 +1108,7 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
             working_dir: None,
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1104,6 +1118,7 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1196,6 +1211,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
+        terminal: Default::default(),
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1205,6 +1221,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1278,6 +1295,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         inbox_dir: messages.join("to_coder-1"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
     let coder_2 = AgentConfig {
         agent_id: "coder-2".into(),
@@ -1287,6 +1305,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         inbox_dir: messages.join("to_coder-2"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
     let reviewer = AgentConfig {
         agent_id: "reviewer".into(),
@@ -1296,6 +1315,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         inbox_dir: messages.join("to_reviewer"),
         allowed_write_dirs: vec![],
             working_dir: None,
+        terminal: Default::default(),
     };
 
     let groups = vec![WorkerGroupConfig {

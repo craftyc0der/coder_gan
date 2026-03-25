@@ -95,11 +95,26 @@ layout = "horizontal"
 count = 2
 ```
 
+Optional terminal setting (top-level or per-agent):
+
+```toml
+terminal = "iterm2"   # project-wide default on macOS
+
+[[agents]]
+id = "coder"
+command = "claude"
+prompt_file = "prompts/coder.md"
+worktree_prompt_file = "prompts/coder-worktree.md"
+allowed_write_dirs = ["orchestrator/src/"]
+terminal = "terminal"  # optional override for this agent only
+```
+
 - **Tmux session names** are auto-derived: `{project-dir-name}-{agent-id}` (e.g., `myproject-coder`)
 - **Inbox directories** are auto-derived: `.orchestrator/messages/to_{agent_id}/`
 - **Prompt template variables**: `{{project_root}}`, `{{messages_dir}}`, `{{agent_id}}`, `{{instance_suffix}}`, `{{peer_inboxes}}`, `{{peer_ids}}`, `{{instance_index}}`, `{{group_count}}`, `{{worker_inboxes}}`
 - **Worker groups**: Agents listed in `[[worker_groups]]` launch together in a single tmux session with split panes. When `count > 1`, each instance gets a numeric suffix (e.g., `coder-1`, `coder-2`)
 - **Worktree prompts**: When `--worktree` mode is active, the `worktree_prompt_file` is appended to each agent's startup prompt with git branch/worktree variables
+- **Supported `terminal` values**: `auto` (default), `iterm2`, `terminal`
 
 ## Rust Orchestrator Architecture
 
@@ -126,7 +141,7 @@ The orchestrator has 8 core modules in `orchestrator/src/`:
 
 The orchestrator supports cross-platform terminal window launching to visualize agent sessions:
 
-- **macOS**: Uses `Terminal.app` via AppleScript.
+- **macOS**: Supports `Terminal.app` and `iTerm2`.
 - **Linux**: Automatically detects and launches the appropriate terminal emulator with no-fork flags. Supported emulators include:
   - `ptyxis` (Fedora GNOME default)
   - `gnome-terminal` (Ubuntu/GNOME)
@@ -135,6 +150,49 @@ The orchestrator supports cross-platform terminal window launching to visualize 
   - `alacritty`
   - `kitty`
   - `xterm`
+
+### Using iTerm2 on macOS
+
+If you want agent sessions to open in iTerm2 instead of Terminal.app, set `terminal = "iterm2"` in `.orchestrator/agents.toml`.
+
+Project-wide default:
+
+```toml
+terminal = "iterm2"
+
+[[agents]]
+id = "coder"
+command = "claude"
+prompt_file = "prompts/coder.md"
+allowed_write_dirs = ["src/"]
+```
+
+Per-agent override:
+
+```toml
+[[agents]]
+id = "reviewer"
+command = "cursor agent"
+prompt_file = "prompts/reviewer.md"
+allowed_write_dirs = ["/"]
+terminal = "iterm2"
+```
+
+Behavior:
+
+- `iterm2` uses iTerm2 tabs/windows running regular `tmux attach`.
+- `auto` remains the default and uses Terminal.app on macOS.
+- `terminal` forces Terminal.app for that project or agent.
+- On non-macOS platforms, `iterm2` falls back to the normal auto-detected terminal behavior.
+
+Typical workflow:
+
+```bash
+cd orchestrator
+cargo run -- run /path/to/project
+```
+
+When the target project's `agents.toml` has `terminal = "iterm2"`, the orchestrator will open the agent sessions in iTerm2.
 
 ## Build Commands
 

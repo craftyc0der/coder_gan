@@ -166,6 +166,10 @@ pub struct AgentConfig {
     /// points to the agent's git worktree directory.
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
+    /// Terminal emulator preference for this agent (resolved from per-agent
+    /// override or project-wide default).
+    #[serde(skip)]
+    pub terminal: crate::config::TerminalPreference,
 }
 
 /// A resolved worker group ready for the supervisor to spawn as a single
@@ -477,7 +481,8 @@ impl Registry {
 
         match self
             .injector
-            .spawn_group_session(&group.session_name, &cmds, &group.layout)
+            .spawn_group_session(&group.session_name, &cmds, &group.layout,
+                group.members.first().map(|m| &m.terminal).unwrap_or(&crate::config::TerminalPreference::Auto))
         {
             Ok(terminal_handle) => {
                 let mut agents = self.agents.lock().await;
@@ -528,7 +533,7 @@ impl Registry {
 
         match self
             .injector
-            .spawn_session(&config.tmux_session, &effective_cmd)
+            .spawn_session(&config.tmux_session, &effective_cmd, &config.terminal)
         {
             Ok(terminal_handle) => {
                 let state = AgentState {
@@ -891,7 +896,7 @@ impl Registry {
 
                                 match self
                                     .injector
-                                    .spawn_session(&config.tmux_session, &effective_cmd)
+                                    .spawn_session(&config.tmux_session, &effective_cmd, &config.terminal)
                                 {
                                     Ok(new_handle) => {
                                         if let Some(handle) = old_handle {
