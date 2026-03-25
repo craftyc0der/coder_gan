@@ -85,7 +85,25 @@ prompt_file = "prompts/coder.md"
 allowed_write_dirs = ["src/"]
 branch = "{{branch}}/impl"                   # optional: git branch for worktree (supports {{branch}} template)
 worktree_prompt_file = "prompts/coder-worktree.md"  # optional: appended to prompt when --worktree is active
+terminal = "iterm2"                              # optional: "auto" (default), "iterm2", or "terminal"
 ```
+
+Optional project-wide terminal setting (top-level in `agents.toml`):
+
+```toml
+terminal = "iterm2"   # project-wide default; individual agents can override
+
+[[agents]]
+id = "coder"
+command = "claude"
+# ...
+terminal = "terminal"  # override: use Terminal.app for this agent only
+```
+
+Supported `terminal` values:
+- `auto` (default): Terminal.app on macOS, auto-detect on Linux.
+- `iterm2`: iTerm2 with native tmux integration (`tmux -CC`). macOS only; falls back to auto on other platforms.
+- `terminal`: Explicitly use Terminal.app on macOS.
 
 Supported `command` values: `claude`, `codex`, `copilot`, `cursor agent`, `gemini`.
 

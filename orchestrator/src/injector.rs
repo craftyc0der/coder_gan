@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::process::Command;
 use tokio::time::{sleep, Duration};
 
-use crate::config::SplitDirection;
+use crate::config::{SplitDirection, TerminalPreference};
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BACKOFF_SECS: u64 = 1;
@@ -68,7 +68,7 @@ pub fn has_session(session: &str) -> bool {
 /// then open a visible terminal window attached to it.
 /// Returns the terminal handle on success, or `None` if the handle
 /// could not be determined (e.g. headless mode or unsupported OS).
-pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
+pub fn spawn_session(session: &str, cmd: &str, terminal: &TerminalPreference) -> Result<Option<u32>, InjectionError> {
     let wrapped_cmd = wrap_for_tmux_shell(cmd);
 
     // Create the detached session
@@ -152,7 +152,7 @@ pub fn spawn_session(session: &str, cmd: &str) -> Result<Option<u32>, InjectionE
         });
     }
 
-    Ok(open_terminal_window(session))
+    Ok(open_terminal_window(session, terminal))
 }
 
 /// Spawn a detached tmux session with multiple panes for a worker group.
@@ -165,6 +165,7 @@ pub fn spawn_group_session(
     session: &str,
     cmds: &[&str],
     layout: &SplitDirection,
+    terminal: &TerminalPreference,
 ) -> Result<Option<u32>, InjectionError> {
     if cmds.is_empty() {
         return Err(InjectionError::TmuxCommand {
@@ -233,14 +234,23 @@ pub fn spawn_group_session(
             .status();
     }
 
-    Ok(open_terminal_window(session))
+    Ok(open_terminal_window(session, terminal))
 }
 
 /// Open a visible terminal window attached to the given tmux session.
 /// Returns a platform-specific handle (window ID on macOS, PID on Linux).
-pub fn open_terminal_window(session: &str) -> Option<u32> {
+///
+/// The `terminal` parameter controls which terminal emulator is used:
+/// - `Auto`: Terminal.app on macOS, auto-detect on Linux.
+/// - `Iterm2`: iTerm2 with native tmux integration (`tmux -CC`). macOS only.
+/// - `Terminal`: Explicitly Terminal.app on macOS.
+pub fn open_terminal_window(session: &str, terminal: &TerminalPreference) -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
+        if *terminal == TerminalPreference::Iterm2 {
+            return open_iterm2_window(session);
+        }
+
         let script = format!(
             "tell application \"Terminal\"\n\
              activate\n\
@@ -264,6 +274,7 @@ pub fn open_terminal_window(session: &str) -> Option<u32> {
 
     #[cfg(target_os = "linux")]
     {
+        let _ = terminal; // iTerm2 not available on Linux; ignore preference
         // Check for graphical display
         if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return None;
@@ -279,8 +290,45 @@ pub fn open_terminal_window(session: &str) -> Option<u32> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        let _ = terminal;
         None
     }
+}
+
+/// Open an iTerm2 window with native tmux integration (`tmux -CC attach`).
+///
+/// Uses AppleScript to tell iTerm2 to create a new window running the
+/// tmux control-mode attach command. The tmux server-side session is
+/// unchanged — all inject/capture operations continue to work normally.
+/// The `-CC` flag gives iTerm2 native tabs, scrollback, and split panes
+/// instead of the usual terminal-in-a-terminal tmux experience.
+///
+/// Returns the iTerm2 window ID on success.
+#[cfg(target_os = "macos")]
+fn open_iterm2_window(session: &str) -> Option<u32> {
+    let script = format!(
+        "tell application \"iTerm2\"\n\
+         activate\n\
+         set newWindow to (create window with default profile command \"tmux -CC attach -t {session}\")\n\
+         return id of newWindow\n\
+         end tell"
+    );
+    Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                s.parse::<u32>().ok()
+            } else {
+                eprintln!(
+                    "[injector] iTerm2 AppleScript failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                None
+            }
+        })
 }
 
 /// Detect an available terminal emulator and return the command and args needed
@@ -408,12 +456,26 @@ pub fn detect_terminal_emulator(session: &str) -> Option<(String, Vec<String>)> 
 }
 
 /// Close a terminal window by its handle.
-/// macOS: closes the Terminal.app window by ID.
+/// macOS: tries both iTerm2 and Terminal.app to close the window by ID.
 /// Linux: kills the terminal emulator process by PID.
 /// Silently no-ops if the window/process no longer exists.
 pub fn close_terminal_handle(handle: u32) {
     #[cfg(target_os = "macos")]
     {
+        // Try iTerm2 first, then Terminal.app. One will match, the other
+        // will silently no-op because the window ID won't be found.
+        let iterm_script = format!(
+            "tell application \"iTerm2\"\n\
+             repeat with w in windows\n\
+             if id of w is {handle} then\n\
+             close w\n\
+             return\n\
+             end if\n\
+             end repeat\n\
+             end tell"
+        );
+        let _ = Command::new("osascript").args(["-e", &iterm_script]).status();
+
         let script = format!(
             "tell application \"Terminal\"\n\
              set matchingWindows to windows whose id is {handle}\n\
@@ -758,7 +820,7 @@ pub trait InjectorOps: Send + Sync {
     fn kill_session(&self, session: &str);
     /// Spawn a tmux session. Returns the terminal handle if one was
     /// opened, or `None` (e.g. in tests or headless mode).
-    fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError>;
+    fn spawn_session(&self, session: &str, cmd: &str, terminal: &TerminalPreference) -> Result<Option<u32>, InjectionError>;
     /// Spawn a tmux session with multiple panes for a worker group.
     /// The first command in `cmds` gets pane 0; subsequent commands are split
     /// in the given direction.  Returns the terminal window handle.
@@ -767,6 +829,7 @@ pub trait InjectorOps: Send + Sync {
         session: &str,
         cmds: &[&str],
         layout: &SplitDirection,
+        terminal: &TerminalPreference,
     ) -> Result<Option<u32>, InjectionError>;
     /// Kill the running process inside the pane and restart it with a new
     /// command, keeping the tmux session (and any attached terminal) alive.
@@ -805,16 +868,17 @@ impl InjectorOps for RealInjector {
     fn kill_session(&self, session: &str) {
         kill_session(session)
     }
-    fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
-        spawn_session(session, cmd)
+    fn spawn_session(&self, session: &str, cmd: &str, terminal: &TerminalPreference) -> Result<Option<u32>, InjectionError> {
+        spawn_session(session, cmd, terminal)
     }
     fn spawn_group_session(
         &self,
         session: &str,
         cmds: &[&str],
         layout: &SplitDirection,
+        terminal: &TerminalPreference,
     ) -> Result<Option<u32>, InjectionError> {
-        spawn_group_session(session, cmds, layout)
+        spawn_group_session(session, cmds, layout, terminal)
     }
     fn respawn_pane(&self, session: &str, cmd: &str) -> Result<(), InjectionError> {
         respawn_pane(session, cmd)

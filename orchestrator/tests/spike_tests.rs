@@ -49,7 +49,7 @@ impl InjectorOps for MockInjector {
         self.killed.lock().unwrap().push(session.to_string());
     }
 
-    fn spawn_session(&self, session: &str, cmd: &str) -> Result<Option<u32>, InjectionError> {
+    fn spawn_session(&self, session: &str, cmd: &str, _terminal: &orchestrator::config::TerminalPreference) -> Result<Option<u32>, InjectionError> {
         self.spawned
             .lock()
             .unwrap()
@@ -148,6 +148,7 @@ impl InjectorOps for MockInjector {
         _session: &str,
         _cmds: &[&str],
         _layout: &orchestrator::config::SplitDirection,
+        _terminal: &orchestrator::config::TerminalPreference,
     ) -> Result<Option<u32>, InjectionError> {
         Ok(None)
     }
@@ -175,6 +176,7 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
         log_dir: dot.join("runtime/logs"),
         state_path: dot.join("runtime/logs/state.json"),
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
+        terminal: Default::default(),
         agents,
         worker_groups: vec![],
         worktree_feature: None,
@@ -194,6 +196,7 @@ fn make_agents() -> Vec<AgentEntry> {
             timers: vec![],
             branch: None,
             worktree_prompt_file: None,
+            terminal: None,
         },
         AgentEntry {
             id: "tester".into(),
@@ -205,6 +208,7 @@ fn make_agents() -> Vec<AgentEntry> {
             timers: vec![],
             branch: None,
             worktree_prompt_file: None,
+            terminal: None,
         },
     ]
 }
@@ -421,6 +425,7 @@ async fn interrupt_spike_sends_correct_keys_for_claude() {
         timers: vec![],
         branch: None,
         worktree_prompt_file: None,
+        terminal: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
@@ -469,6 +474,7 @@ async fn interrupt_spike_sends_escape_for_copilot() {
         timers: vec![],
         branch: None,
         worktree_prompt_file: None,
+        terminal: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
@@ -548,6 +554,7 @@ async fn interrupt_spike_post_inject_succeeds() {
         timers: vec![],
         branch: None,
         worktree_prompt_file: None,
+        terminal: None,
     }];
     let config = make_config(&tmp, agents);
     let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");

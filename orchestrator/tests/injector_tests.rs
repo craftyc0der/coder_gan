@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "linux")]
 use orchestrator::injector::detect_terminal_emulator;
+use orchestrator::config::TerminalPreference;
 use orchestrator::injector::{close_terminal_handle, inject, open_terminal_window, spawn_session};
 use tempfile::TempDir;
 
@@ -113,7 +114,7 @@ fn spawn_session_enables_mouse_and_history_scrollback() {
         std::env::remove_var("DISPLAY");
         std::env::remove_var("WAYLAND_DISPLAY");
 
-        let r = spawn_session("demo-session", "echo hi");
+        let r = spawn_session("demo-session", "echo hi", &TerminalPreference::Auto);
 
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
@@ -189,7 +190,7 @@ fn open_terminal_window_headless() {
     std::env::remove_var("DISPLAY");
     std::env::remove_var("WAYLAND_DISPLAY");
 
-    let result = open_terminal_window("test-session");
+    let result = open_terminal_window("test-session", &TerminalPreference::Auto);
     assert_eq!(result, None);
 
     if let Some(val) = orig_display {

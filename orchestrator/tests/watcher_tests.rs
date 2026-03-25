@@ -31,7 +31,7 @@ impl InjectorOps for MockInjector {
 
     fn kill_session(&self, _session: &str) {}
 
-    fn spawn_session(&self, _session: &str, _cmd: &str) -> Result<Option<u32>, InjectionError> {
+    fn spawn_session(&self, _session: &str, _cmd: &str, _terminal: &orchestrator::config::TerminalPreference) -> Result<Option<u32>, InjectionError> {
         Ok(None) // No terminal window in tests
     }
 
@@ -86,6 +86,7 @@ impl InjectorOps for MockInjector {
         _session: &str,
         _cmds: &[&str],
         _layout: &orchestrator::config::SplitDirection,
+        _terminal: &orchestrator::config::TerminalPreference,
     ) -> Result<Option<u32>, InjectionError> {
         Ok(None)
     }
@@ -125,6 +126,7 @@ async fn make_registry(tmp: &TempDir, injector: Arc<dyn InjectorOps>) -> Registr
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: None,
+        terminal: Default::default(),
     }];
 
     let registry = Registry::new_with_injector(configs, state_path, log_dir, logger, injector);

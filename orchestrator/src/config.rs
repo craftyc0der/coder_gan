@@ -56,6 +56,21 @@ impl From<std::io::Error> for ConfigError {
 // TOML schema
 // ---------------------------------------------------------------------------
 
+/// Which terminal emulator to use for opening agent windows.
+///
+/// - `Auto` (default): Terminal.app on macOS, auto-detect on Linux.
+/// - `Iterm2`: Use iTerm2 with native tmux integration (`tmux -CC`).
+///   Only available on macOS; falls back to `Auto` on other platforms.
+/// - `Terminal`: Explicitly use Terminal.app on macOS.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalPreference {
+    #[default]
+    Auto,
+    Iterm2,
+    Terminal,
+}
+
 /// How panes are arranged in a worker-group tmux session.
 /// `Horizontal` splits left|right; `Vertical` splits top|bottom.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -91,6 +106,10 @@ pub struct AgentsToml {
     pub agents: Vec<AgentEntry>,
     #[serde(default)]
     pub worker_groups: Vec<WorkerGroupEntry>,
+    /// Project-wide default terminal emulator. Individual agents can override
+    /// this via their own `terminal` field.
+    #[serde(default)]
+    pub terminal: TerminalPreference,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,6 +143,10 @@ pub struct AgentEntry {
     /// is active. Path is relative to `.orchestrator/` (e.g. `prompts/coder-worktree.md`).
     #[serde(default)]
     pub worktree_prompt_file: Option<String>,
+    /// Terminal emulator override for this agent. When set, takes priority
+    /// over the project-wide `terminal` setting in `agents.toml`.
+    #[serde(default)]
+    pub terminal: Option<TerminalPreference>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]
@@ -283,6 +306,8 @@ pub struct ProjectConfig {
     pub transcript_dir: PathBuf,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
+    /// Project-wide default terminal emulator preference.
+    pub terminal: TerminalPreference,
     /// Worktree mode: set when `--worktree --branch <name>` is used.
     /// Contains the feature/branch name (e.g. "PR-123").
     pub worktree_feature: Option<String>,
@@ -572,6 +597,7 @@ impl ProjectConfig {
             log_dir,
             state_path,
             transcript_dir,
+            terminal: agents_toml.terminal,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,
             worktree_feature: None,
@@ -645,6 +671,7 @@ impl ProjectConfig {
             // When in worktree mode, resolve allowed_write_dirs relative to the
             // worktree root instead of the main project root.
             let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
+            let terminal = a.terminal.clone().unwrap_or_else(|| self.terminal.clone());
             configs.push(AgentConfig {
                 agent_id: a.id.clone(),
                 cli_command: a.command.clone(),
@@ -657,6 +684,7 @@ impl ProjectConfig {
                     .map(|d| base_root.join(d))
                     .collect(),
                 working_dir,
+                terminal,
             });
         }
 
@@ -681,6 +709,7 @@ impl ProjectConfig {
                         .or_else(|| wt_map.get(agent_id.as_str()))
                         .map(|wt| wt.worktree_path.clone());
                     let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
+                    let terminal = a.terminal.clone().unwrap_or_else(|| self.terminal.clone());
                     configs.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -693,6 +722,7 @@ impl ProjectConfig {
                             .map(|d| base_root.join(d))
                             .collect(),
                         working_dir,
+                        terminal,
                     });
                 }
             }
@@ -731,6 +761,7 @@ impl ProjectConfig {
                         .or_else(|| wt_map.get(agent_id.as_str()))
                         .map(|wt| wt.worktree_path.clone());
                     let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
+                    let terminal = a.terminal.clone().unwrap_or_else(|| self.terminal.clone());
                     members.push(AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -743,6 +774,7 @@ impl ProjectConfig {
                             .map(|d| base_root.join(d))
                             .collect(),
                         working_dir,
+                        terminal,
                     });
                 }
                 groups.push(WorkerGroupConfig {

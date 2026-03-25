@@ -163,7 +163,8 @@ pub async fn run_spike_with_deps<I: InjectorOps>(
         "Spawning tmux session '{session}' running '{}'...",
         agent.command
     );
-    if let Err(e) = inj.spawn_session(&session, &agent.command) {
+    let terminal = agent.terminal.clone().unwrap_or_else(|| config.terminal.clone());
+    if let Err(e) = inj.spawn_session(&session, &agent.command, &terminal) {
         return Err(format!("spawn_session failed: {e}"));
     }
     logger.log(Event::AgentSpawn {
@@ -343,7 +344,7 @@ pub async fn run_spike_with_deps<I: InjectorOps>(
         eprintln!("  ERROR: session still alive after kill!");
     } else {
         println!("  Session confirmed dead. Respawning...");
-        if let Err(e) = inj.spawn_session(&session, &agent.command) {
+        if let Err(e) = inj.spawn_session(&session, &agent.command, &terminal) {
             return Err(format!("respawn failed: {e}"));
         }
         logger.log(Event::AgentRestart {
@@ -444,7 +445,8 @@ pub async fn run_spike_interrupt_with_deps<I: InjectorOps>(
         "Spawning tmux session '{session}' running '{}'...",
         agent.command
     );
-    if let Err(e) = inj.spawn_session(&session, &agent.command) {
+    let terminal = agent.terminal.clone().unwrap_or_else(|| config.terminal.clone());
+    if let Err(e) = inj.spawn_session(&session, &agent.command, &terminal) {
         return Err(format!("spawn_session failed: {e}"));
     }
     logger.log(Event::AgentSpawn {
