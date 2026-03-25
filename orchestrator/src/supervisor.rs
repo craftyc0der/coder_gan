@@ -1187,9 +1187,20 @@ impl Registry {
         group: &WorkerGroupConfig,
         prompts: &HashMap<String, String>,
     ) {
-        // Register configs for new agents
-        // Note: configs is Arc<HashMap> and immutable, so new agents spawned
-        // via scaling won't be in it. We handle this by passing config directly.
+        {
+            let mut stored_prompts = self.startup_prompts.lock().await;
+            for member in &group.members {
+                if let Some(prompt) = prompts.get(&member.agent_id) {
+                    stored_prompts.insert(member.agent_id.clone(), prompt.clone());
+                }
+            }
+        }
+        {
+            let mut groups = self.worker_groups.lock().await;
+            if !groups.iter().any(|existing| existing.session_name == group.session_name) {
+                groups.push(group.clone());
+            }
+        }
 
         self.spawn_group(group).await;
 
@@ -1207,6 +1218,32 @@ impl Registry {
                 }
             }
         }
+    }
+
+    pub async fn unregister_group_runtime(
+        &self,
+        agent_ids: &[String],
+        session_names: &[String],
+    ) {
+        {
+            let mut agents = self.agents.lock().await;
+            for agent_id in agent_ids {
+                agents.remove(agent_id);
+            }
+        }
+        {
+            let mut prompts = self.startup_prompts.lock().await;
+            for agent_id in agent_ids {
+                prompts.remove(agent_id);
+            }
+        }
+        {
+            let sessions: std::collections::HashSet<&str> =
+                session_names.iter().map(|session| session.as_str()).collect();
+            let mut groups = self.worker_groups.lock().await;
+            groups.retain(|group| !sessions.contains(group.session_name.as_str()));
+        }
+        self.persist_state().await;
     }
 
     /// Kill all agent tmux sessions and close their terminal windows.

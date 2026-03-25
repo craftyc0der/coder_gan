@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -29,6 +29,49 @@ async fn prompt_line(
 /// Returns true if the input is a "back" command (empty, "b", "back").
 fn is_back(input: &str) -> bool {
     matches!(input, "" | "b" | "B" | "back")
+}
+
+fn parse_group_instance(base_agent_id: &str, live_agent_id: &str) -> Option<u32> {
+    if live_agent_id == base_agent_id {
+        return Some(1);
+    }
+
+    live_agent_id
+        .strip_prefix(base_agent_id)
+        .and_then(|suffix| suffix.strip_prefix('-'))
+        .and_then(|suffix| suffix.parse::<u32>().ok())
+}
+
+fn live_group_instances_from_ids(group_agent_ids: &[String], live_agent_ids: &[String]) -> Vec<u32> {
+    let mut instances = BTreeSet::new();
+
+    for live_agent_id in live_agent_ids {
+        for group_agent_id in group_agent_ids {
+            if let Some(instance) = parse_group_instance(group_agent_id, live_agent_id) {
+                instances.insert(instance);
+                break;
+            }
+        }
+    }
+
+    instances.into_iter().collect()
+}
+
+async fn live_group_instances(registry: &Registry, group: &crate::config::WorkerGroupEntry) -> Vec<u32> {
+    let agents = registry.agents.lock().await;
+    let live_agent_ids: Vec<String> = agents.keys().cloned().collect();
+    drop(agents);
+    live_group_instances_from_ids(&group.agents, &live_agent_ids)
+}
+
+fn highest_instances_to_remove(live_instances: &[u32], target_count: u32) -> Vec<u32> {
+    let remove_count = live_instances.len().saturating_sub(target_count as usize);
+    live_instances
+        .iter()
+        .rev()
+        .take(remove_count)
+        .copied()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -308,23 +351,7 @@ async fn handle_modify_workers(
     loop {
         println!("\n  Worker groups:");
         for (i, group) in config.worker_groups.iter().enumerate() {
-            // Count current instances by scanning registry
-            let agents = registry.agents.lock().await;
-            let prefix = format!("{}-", group.agents.first().unwrap_or(&group.id));
-            let current = agents
-                .keys()
-                .filter(|k| {
-                    k.starts_with(&prefix) && k[prefix.len()..].chars().all(|c| c.is_ascii_digit())
-                })
-                .count()
-                .max(
-                    if agents.contains_key(group.agents.first().unwrap_or(&group.id)) {
-                        1
-                    } else {
-                        0
-                    },
-                );
-            drop(agents);
+            let current = live_group_instances(registry, group).await.len();
 
             println!(
                 "  {}) {} — agents: [{}], current instances: {}",
@@ -354,12 +381,14 @@ async fn handle_modify_workers(
         };
 
         let group = &config.worker_groups[group_idx];
+        let live_instances = live_group_instances(registry, group).await;
+        let old_count = live_instances.len() as u32;
 
         let count_input = match prompt_line(
             lines,
             &format!(
                 "  Enter new team count (currently: {}), or Enter to go back: ",
-                group.count
+                old_count
             ),
         )
         .await
@@ -380,7 +409,6 @@ async fn handle_modify_workers(
             }
         };
 
-        let old_count = group.count;
         if new_count == old_count {
             println!("  No change.");
             continue;
@@ -406,6 +434,7 @@ async fn handle_modify_workers(
                         crate::config::expand_agent_id(agent_id, instance, new_count);
                     let tmux_target = format!("{}:0.{}", session, pane_idx);
                     let base_root = &config.project_root;
+                    let terminal = a.terminal.clone().unwrap_or_else(|| config.terminal.clone());
                     members.push(crate::supervisor::AgentConfig {
                         agent_id: expanded_id.clone(),
                         cli_command: a.command.clone(),
@@ -418,6 +447,7 @@ async fn handle_modify_workers(
                             .map(|d| base_root.join(d))
                             .collect(),
                         working_dir: None,
+                        terminal,
                     });
                 }
 
@@ -432,7 +462,11 @@ async fn handle_modify_workers(
                     members,
                 };
 
-                let prompts = match config.startup_prompts() {
+                let prompts = match config.startup_prompts_for_group_instances(
+                    &group.id,
+                    &[instance],
+                    new_count,
+                ) {
                     Ok(p) => p,
                     Err(_) => HashMap::new(),
                 };
@@ -450,30 +484,45 @@ async fn handle_modify_workers(
             // Scale down: kill highest ordinal instances
             println!("  Scaling down {} → {} teams...", old_count, new_count);
 
-            for instance in (new_count + 1)..=old_count {
-                for agent_id in &group.agents {
-                    let expanded_id =
-                        crate::config::expand_agent_id(agent_id, instance, old_count);
-                    let agents = registry.agents.lock().await;
-                    if let Some(state) = agents.get(&expanded_id) {
-                        let session = state.tmux_session.clone();
-                        let handle = state.terminal_handle;
-                        drop(agents);
+            let instances_to_remove = highest_instances_to_remove(&live_instances, new_count);
+            let mut agent_ids_to_remove = HashSet::new();
+            let mut sessions_to_kill = HashSet::new();
+            let mut terminal_handles_to_close = HashSet::new();
 
-                        if crate::injector::has_session(&session) {
-                            crate::injector::kill_session(&session);
-                            println!("  Killed session: {}", session);
+            {
+                let agents = registry.agents.lock().await;
+                for instance in &instances_to_remove {
+                    for (agent_id, state) in agents.iter() {
+                        let matches_instance = group.agents.iter().any(|base_agent_id| {
+                            parse_group_instance(base_agent_id, agent_id) == Some(*instance)
+                        });
+                        if matches_instance {
+                            agent_ids_to_remove.insert(agent_id.clone());
+                            sessions_to_kill.insert(state.tmux_session.clone());
+                            if let Some(handle) = state.terminal_handle {
+                                terminal_handles_to_close.insert(handle);
+                            }
                         }
-                        if let Some(h) = handle {
-                            crate::injector::close_terminal_handle(h);
-                        }
-
-                        registry.agents.lock().await.remove(&expanded_id);
-                    } else {
-                        drop(agents);
                     }
                 }
             }
+
+            for session in &sessions_to_kill {
+                if crate::injector::has_session(session) {
+                    crate::injector::kill_session(session);
+                    println!("  Killed session: {}", session);
+                }
+            }
+            for handle in terminal_handles_to_close {
+                crate::injector::close_terminal_handle(handle);
+            }
+            let mut agent_ids_to_remove: Vec<String> = agent_ids_to_remove.into_iter().collect();
+            agent_ids_to_remove.sort();
+            let mut session_names: Vec<String> = sessions_to_kill.into_iter().collect();
+            session_names.sort();
+            registry
+                .unregister_group_runtime(&agent_ids_to_remove, &session_names)
+                .await;
 
             logger.log(Event::WorkersScaled {
                 group_id: group.id.clone(),
@@ -484,6 +533,53 @@ async fn handle_modify_workers(
         }
 
         // After scaling, loop back to show updated group list
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{highest_instances_to_remove, live_group_instances_from_ids};
+
+    #[test]
+    fn live_group_instances_detects_all_suffixes() {
+        let group_agents = vec!["coder".to_string(), "tester".to_string()];
+        let live_agent_ids = vec![
+            "coder-1".to_string(),
+            "tester-1".to_string(),
+            "coder-2".to_string(),
+            "tester-2".to_string(),
+            "coder-3".to_string(),
+            "tester-3".to_string(),
+        ];
+
+        assert_eq!(
+            live_group_instances_from_ids(&group_agents, &live_agent_ids),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn live_group_instances_handles_mixed_unsuffixed_and_suffixed_agents() {
+        let group_agents = vec!["coder".to_string(), "tester".to_string()];
+        let live_agent_ids = vec![
+            "coder-1".to_string(),
+            "tester-1".to_string(),
+            "coder-3".to_string(),
+            "tester-3".to_string(),
+            "reviewer".to_string(),
+        ];
+
+        assert_eq!(
+            live_group_instances_from_ids(&group_agents, &live_agent_ids),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn highest_instances_to_remove_prefers_highest_ordinals() {
+        assert_eq!(highest_instances_to_remove(&[1, 2, 3], 1), vec![3, 2]);
+        assert_eq!(highest_instances_to_remove(&[1, 2, 3], 2), vec![3]);
+        assert_eq!(highest_instances_to_remove(&[1], 1), Vec::<u32>::new());
     }
 }
 
