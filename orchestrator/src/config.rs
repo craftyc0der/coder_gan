@@ -59,7 +59,7 @@ impl From<std::io::Error> for ConfigError {
 /// Which terminal emulator to use for opening agent windows.
 ///
 /// - `Auto` (default): Terminal.app on macOS, auto-detect on Linux.
-/// - `Iterm2`: Use iTerm2 with native tmux integration (`tmux -CC`).
+/// - `Iterm2`: Use iTerm2 tabs/windows with `tmux attach`.
 ///   Only available on macOS; falls back to `Auto` on other platforms.
 /// - `Terminal`: Explicitly use Terminal.app on macOS.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq)]

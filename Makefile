@@ -1,10 +1,13 @@
-.PHONY: build test run stop kill
+.PHONY: build test install run stop kill
 
 build:
 	cd orchestrator && cargo build
 
 test:
 	cd orchestrator && cargo test
+
+install:
+	cargo install --path orchestrator
 
 run:
 	cargo run --manifest-path orchestrator/Cargo.toml -- run .

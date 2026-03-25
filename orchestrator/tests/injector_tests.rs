@@ -144,7 +144,7 @@ fn spawn_session_enables_mouse_and_history_scrollback() {
     assert_eq!(lines.len(), 5);
     assert_eq!(
         lines[0],
-        "new-session -d -s demo-session -x 200 -y 50 echo hi"
+        "new-session -d -s demo-session -x 200 -y 50 exec '/bin/zsh' -l -c 'echo hi'"
     );
     assert_eq!(lines[1], "set-option -t demo-session mouse on");
     assert_eq!(lines[2], "set-option -t demo-session history-limit 100000");
@@ -233,7 +233,7 @@ fn open_terminal_window_macos_returns_none_on_osascript_failure() {
             ),
         );
 
-        let r = open_terminal_window("test-session");
+        let r = open_terminal_window("test-session", &TerminalPreference::Auto);
 
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
@@ -270,7 +270,7 @@ fn open_terminal_window_macos_parses_window_id() {
             ),
         );
 
-        let r = open_terminal_window("test-session");
+        let r = open_terminal_window("test-session", &TerminalPreference::Auto);
 
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
