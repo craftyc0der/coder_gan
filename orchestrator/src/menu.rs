@@ -8,8 +8,35 @@ use crate::config::ProjectConfig;
 use crate::logger::{Event, Logger};
 use crate::supervisor::Registry;
 
-/// Run the interactive CLI menu loop. This replaces the simple Ctrl+C wait
-/// in the run_orchestrator flow.
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Prompt for a single line of input. Returns the trimmed string,
+/// or `None` on EOF. Empty input (just Enter) returns `Some("")`.
+async fn prompt_line(
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+    prompt: &str,
+) -> Option<String> {
+    print!("{}", prompt);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    match lines.next_line().await {
+        Ok(Some(l)) => Some(l.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Returns true if the input is a "back" command (empty, "b", "back").
+fn is_back(input: &str) -> bool {
+    matches!(input, "" | "b" | "B" | "back")
+}
+
+// ---------------------------------------------------------------------------
+// Main menu
+// ---------------------------------------------------------------------------
+
+/// Run the interactive CLI menu loop. Returns when the user chooses exit
+/// or Ctrl+C is caught by the caller.
 pub async fn run_menu(
     registry: Registry,
     logger: Arc<Logger>,
@@ -18,52 +45,49 @@ pub async fn run_menu(
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
-    print_menu(registry.is_paused());
+    print_main_menu(registry.is_paused());
 
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(l)) => l.trim().to_string(),
-            Ok(None) => break, // EOF
-            Err(_) => continue,
+        let input = match prompt_line(&mut lines, "> ").await {
+            Some(s) => s,
+            None => break, // EOF
         };
 
-        match line.as_str() {
+        match input.as_str() {
             "1" => handle_pause_unpause(&registry, &logger).await,
-            "2" => handle_stream_logs(&config.log_dir).await,
-            "3" => handle_list_messages(&config.messages_dir).await,
-            "4" => handle_modify_workers(&registry, &logger, config).await,
+            "2" => handle_stream_logs(&config.log_dir, &mut lines).await,
+            "3" => handle_list_messages(&config.messages_dir, &mut lines).await,
+            "4" => handle_modify_workers(&registry, &logger, config, &mut lines).await,
             "5" => handle_send_system_prompts(&registry, &logger, config).await,
-            "6" => handle_status(&registry).await,
-            "q" | "Q" | "quit" | "exit" => break,
-            "" => {
-                print_menu(registry.is_paused());
-                continue;
-            }
-            _ => {
-                println!("Unknown option: {}", line);
-            }
+            "6" => handle_restart_agent(&registry, &mut lines).await,
+            "7" => handle_status(&registry).await,
+            "8" => break, // exit — same as Ctrl+C
+            "" => {} // just redraw menu
+            _ => println!("  Unknown option: {}", input),
         }
 
         println!();
-        print_menu(registry.is_paused());
+        print_main_menu(registry.is_paused());
     }
 }
 
-fn print_menu(paused: bool) {
+fn print_main_menu(paused: bool) {
     let pause_label = if paused { "Unpause" } else { "Pause" };
     println!("╔══════════════════════════════════════╗");
-    println!("║  Orchestrator Menu{}  ║", if paused { " [PAUSED]" } else { "          " });
+    println!(
+        "║  Orchestrator Menu{}  ║",
+        if paused { " [PAUSED]" } else { "          " }
+    );
     println!("╠══════════════════════════════════════╣");
     println!("║  1) {:<33}║", pause_label);
     println!("║  2) Stream logs                      ║");
     println!("║  3) List recent messages              ║");
     println!("║  4) Modify workers (scale teams)     ║");
     println!("║  5) Send system prompts              ║");
-    println!("║  6) Status                           ║");
-    println!("║  q) Quit (shutdown all agents)       ║");
+    println!("║  6) Restart agent                    ║");
+    println!("║  7) Status                           ║");
+    println!("║  8) Exit (shutdown all agents)       ║");
     println!("╚══════════════════════════════════════╝");
-    print!("> ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +111,10 @@ async fn handle_pause_unpause(registry: &Registry, logger: &Logger) {
 // 2) Stream logs
 // ---------------------------------------------------------------------------
 
-async fn handle_stream_logs(log_dir: &Path) {
+async fn handle_stream_logs(
+    log_dir: &Path,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) {
     let events_path = log_dir.join("events.jsonl");
     if !events_path.exists() {
         println!("  No event log found.");
@@ -105,9 +132,13 @@ async fn handle_stream_logs(log_dir: &Path) {
         }
     };
 
-    let lines: Vec<&str> = content.lines().collect();
-    let start = if lines.len() > 20 { lines.len() - 20 } else { 0 };
-    for line in &lines[start..] {
+    let log_lines: Vec<&str> = content.lines().collect();
+    let start = if log_lines.len() > 20 {
+        log_lines.len() - 20
+    } else {
+        0
+    };
+    for line in &log_lines[start..] {
         println!("  {}", line);
     }
 
@@ -139,9 +170,7 @@ async fn handle_stream_logs(log_dir: &Path) {
         }
     });
 
-    // Wait for Enter
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
+    // Wait for Enter to go back
     let _ = lines.next_line().await;
 
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -153,7 +182,10 @@ async fn handle_stream_logs(log_dir: &Path) {
 // 3) List recent messages
 // ---------------------------------------------------------------------------
 
-async fn handle_list_messages(messages_dir: &Path) {
+async fn handle_list_messages(
+    messages_dir: &Path,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) {
     let processed_dir = messages_dir.join("processed");
 
     // Collect messages from all to_* dirs and processed/
@@ -171,7 +203,8 @@ async fn handle_list_messages(messages_dir: &Path) {
                         if ie_name.to_str().map(|n| n.starts_with('.')).unwrap_or(true) {
                             continue;
                         }
-                        let mtime = ie.metadata()
+                        let mtime = ie
+                            .metadata()
                             .and_then(|m| m.modified())
                             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                         all_messages.push((mtime, ie.path(), false));
@@ -188,7 +221,8 @@ async fn handle_list_messages(messages_dir: &Path) {
             if name.to_str().map(|n| n.starts_with('.')).unwrap_or(true) {
                 continue;
             }
-            let mtime = entry.metadata()
+            let mtime = entry
+                .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             all_messages.push((mtime, entry.path(), true));
@@ -206,41 +240,36 @@ async fn handle_list_messages(messages_dir: &Path) {
         return;
     }
 
-    println!("\n  Recent messages (newest first):");
-    println!("  {:<4} {:<10} {:<50}", "#", "STATUS", "FILENAME");
-    println!("  {}", "-".repeat(66));
-
-    for (i, (_, path, processed)) in display.iter().enumerate() {
-        let fname = path.file_name()
-            .and_then(|n: &std::ffi::OsStr| n.to_str())
-            .unwrap_or("?");
-        let status = if *processed { "delivered" } else { "pending" };
-        println!("  {:<4} {:<10} {}", i + 1, status, fname);
-    }
-
-    println!("\n  Enter message number to read (or Enter to go back):");
-    print!("  > ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(l)) => l.trim().to_string(),
-            _ => break,
-        };
+        println!("\n  Recent messages (newest first):");
+        println!("  {:<4} {:<10} {:<50}", "#", "STATUS", "FILENAME");
+        println!("  {}", "-".repeat(66));
 
-        if line.is_empty() {
-            break;
+        for (i, (_, path, processed)) in display.iter().enumerate() {
+            let fname = path
+                .file_name()
+                .and_then(|n: &std::ffi::OsStr| n.to_str())
+                .unwrap_or("?");
+            let status = if *processed { "delivered" } else { "pending" };
+            println!("  {:<4} {:<10} {}", i + 1, status, fname);
         }
 
-        if let Ok(num) = line.parse::<usize>() {
+        let input = match prompt_line(lines, "\n  Enter # to read, or Enter to go back: ").await {
+            Some(s) => s,
+            None => return,
+        };
+
+        if is_back(&input) {
+            return;
+        }
+
+        if let Ok(num) = input.parse::<usize>() {
             if num >= 1 && num <= display.len() {
                 let (_, ref path, _) = display[num - 1];
                 match std::fs::read_to_string(path) {
                     Ok(content) => {
-                        let name = path.file_name()
+                        let name = path
+                            .file_name()
                             .and_then(|n: &std::ffi::OsStr| n.to_str())
                             .unwrap_or("?");
                         println!("\n  --- {} ---", name);
@@ -251,16 +280,13 @@ async fn handle_list_messages(messages_dir: &Path) {
                     }
                     Err(e) => println!("  Failed to read: {e}"),
                 }
+                // After displaying, loop back to the message list
             } else {
                 println!("  Invalid number.");
             }
         } else {
-            println!("  Enter a number or press Enter to go back.");
+            println!("  Invalid input.");
         }
-
-        println!("\n  Enter message number to read (or Enter to go back):");
-        print!("  > ");
-        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
 
@@ -272,183 +298,192 @@ async fn handle_modify_workers(
     registry: &Registry,
     logger: &Logger,
     config: &ProjectConfig,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
 ) {
     if config.worker_groups.is_empty() {
         println!("\n  No worker groups configured. Nothing to modify.");
         return;
     }
 
-    println!("\n  Worker groups:");
-    for (i, group) in config.worker_groups.iter().enumerate() {
-        // Count current instances by scanning registry
-        let agents = registry.agents.lock().await;
-        let prefix = format!("{}-", group.agents.first().unwrap_or(&group.id));
-        let current = agents.keys()
-            .filter(|k| k.starts_with(&prefix) && k[prefix.len()..].chars().all(|c| c.is_ascii_digit()))
-            .count()
-            .max(if agents.contains_key(group.agents.first().unwrap_or(&group.id)) { 1 } else { 0 });
-        drop(agents);
+    loop {
+        println!("\n  Worker groups:");
+        for (i, group) in config.worker_groups.iter().enumerate() {
+            // Count current instances by scanning registry
+            let agents = registry.agents.lock().await;
+            let prefix = format!("{}-", group.agents.first().unwrap_or(&group.id));
+            let current = agents
+                .keys()
+                .filter(|k| {
+                    k.starts_with(&prefix) && k[prefix.len()..].chars().all(|c| c.is_ascii_digit())
+                })
+                .count()
+                .max(
+                    if agents.contains_key(group.agents.first().unwrap_or(&group.id)) {
+                        1
+                    } else {
+                        0
+                    },
+                );
+            drop(agents);
 
-        println!(
-            "  {}) {} — agents: [{}], current instances: {}",
-            i + 1,
-            group.id,
-            group.agents.join(", "),
-            current
-        );
-    }
+            println!(
+                "  {}) {} — agents: [{}], current instances: {}",
+                i + 1,
+                group.id,
+                group.agents.join(", "),
+                current
+            );
+        }
 
-    println!("\n  Enter group number to modify (or Enter to go back):");
-    print!("  > ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+        let input =
+            match prompt_line(lines, "\n  Enter group # to modify, or Enter to go back: ").await {
+                Some(s) => s,
+                None => return,
+            };
 
-    let stdin = BufReader::new(tokio::io::stdin());
-    let mut lines = stdin.lines();
-
-    let line = match lines.next_line().await {
-        Ok(Some(l)) => l.trim().to_string(),
-        _ => return,
-    };
-
-    if line.is_empty() {
-        return;
-    }
-
-    let group_idx = match line.parse::<usize>() {
-        Ok(n) if n >= 1 && n <= config.worker_groups.len() => n - 1,
-        _ => {
-            println!("  Invalid selection.");
+        if is_back(&input) {
             return;
         }
-    };
 
-    let group = &config.worker_groups[group_idx];
+        let group_idx = match input.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= config.worker_groups.len() => n - 1,
+            _ => {
+                println!("  Invalid selection.");
+                continue;
+            }
+        };
 
-    println!("  Enter new team count (currently configured: {}):", group.count);
-    print!("  > ");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+        let group = &config.worker_groups[group_idx];
 
-    let count_line = match lines.next_line().await {
-        Ok(Some(l)) => l.trim().to_string(),
-        _ => return,
-    };
+        let count_input = match prompt_line(
+            lines,
+            &format!(
+                "  Enter new team count (currently: {}), or Enter to go back: ",
+                group.count
+            ),
+        )
+        .await
+        {
+            Some(s) => s,
+            None => return,
+        };
 
-    let new_count = match count_line.parse::<u32>() {
-        Ok(n) if n >= 1 => n,
-        _ => {
-            println!("  Invalid count. Must be >= 1.");
-            return;
+        if is_back(&count_input) {
+            continue; // back to group list
         }
-    };
 
-    let old_count = group.count;
-    if new_count == old_count {
-        println!("  No change.");
-        return;
-    }
+        let new_count = match count_input.parse::<u32>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                println!("  Invalid count. Must be >= 1.");
+                continue;
+            }
+        };
 
-    if new_count > old_count {
-        // Scale up: spawn new group instances
-        println!("  Scaling up {} → {} teams...", old_count, new_count);
+        let old_count = group.count;
+        if new_count == old_count {
+            println!("  No change.");
+            continue;
+        }
 
-        // Build and spawn new group instances
-        // We need to spawn instances for the new ordinals
-        for instance in (old_count + 1)..=new_count {
-            let session = config.group_session_for(&group.id, instance, new_count);
+        if new_count > old_count {
+            // Scale up: spawn new group instances
+            println!("  Scaling up {} → {} teams...", old_count, new_count);
 
-            // Build member configs for this instance
-            let agent_map: HashMap<&str, &crate::config::AgentEntry> =
-                config.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+            for instance in (old_count + 1)..=new_count {
+                let session = config.group_session_for(&group.id, instance, new_count);
 
-            let mut members = Vec::new();
-            for (pane_idx, agent_id) in group.agents.iter().enumerate() {
-                let a = match agent_map.get(agent_id.as_str()) {
-                    Some(a) => a,
-                    None => continue,
+                let agent_map: HashMap<&str, &crate::config::AgentEntry> =
+                    config.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+
+                let mut members = Vec::new();
+                for (pane_idx, agent_id) in group.agents.iter().enumerate() {
+                    let a = match agent_map.get(agent_id.as_str()) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    let expanded_id =
+                        crate::config::expand_agent_id(agent_id, instance, new_count);
+                    let tmux_target = format!("{}:0.{}", session, pane_idx);
+                    let base_root = &config.project_root;
+                    members.push(crate::supervisor::AgentConfig {
+                        agent_id: expanded_id.clone(),
+                        cli_command: a.command.clone(),
+                        tmux_session: session.clone(),
+                        tmux_target,
+                        inbox_dir: config.messages_dir.join(format!("to_{}", expanded_id)),
+                        allowed_write_dirs: a
+                            .allowed_write_dirs
+                            .iter()
+                            .map(|d| base_root.join(d))
+                            .collect(),
+                        working_dir: None,
+                    });
+                }
+
+                for m in &members {
+                    let _ = std::fs::create_dir_all(&m.inbox_dir);
+                }
+
+                let wg_config = crate::supervisor::WorkerGroupConfig {
+                    group_id: format!("{}-{}", group.id, instance),
+                    session_name: session,
+                    layout: group.layout.clone(),
+                    members,
                 };
-                let expanded_id = crate::config::expand_agent_id(agent_id, instance, new_count);
-                let tmux_target = format!("{}:0.{}", session, pane_idx);
-                let base_root = &config.project_root;
-                members.push(crate::supervisor::AgentConfig {
-                    agent_id: expanded_id.clone(),
-                    cli_command: a.command.clone(),
-                    tmux_session: session.clone(),
-                    tmux_target,
-                    inbox_dir: config.messages_dir.join(format!("to_{}", expanded_id)),
-                    allowed_write_dirs: a.allowed_write_dirs
-                        .iter()
-                        .map(|d| base_root.join(d))
-                        .collect(),
-                    working_dir: None,
-                });
+
+                let prompts = match config.startup_prompts() {
+                    Ok(p) => p,
+                    Err(_) => HashMap::new(),
+                };
+
+                registry.spawn_and_prompt_group(&wg_config, &prompts).await;
             }
 
-            // Ensure inbox dirs exist
-            for m in &members {
-                let _ = std::fs::create_dir_all(&m.inbox_dir);
-            }
+            logger.log(Event::WorkersScaled {
+                group_id: group.id.clone(),
+                old_count,
+                new_count,
+            });
+            println!("  Scaled up to {} teams.", new_count);
+        } else {
+            // Scale down: kill highest ordinal instances
+            println!("  Scaling down {} → {} teams...", old_count, new_count);
 
-            let wg_config = crate::supervisor::WorkerGroupConfig {
-                group_id: format!("{}-{}", group.id, instance),
-                session_name: session,
-                layout: group.layout.clone(),
-                members,
-            };
+            for instance in (new_count + 1)..=old_count {
+                for agent_id in &group.agents {
+                    let expanded_id =
+                        crate::config::expand_agent_id(agent_id, instance, old_count);
+                    let agents = registry.agents.lock().await;
+                    if let Some(state) = agents.get(&expanded_id) {
+                        let session = state.tmux_session.clone();
+                        let handle = state.terminal_handle;
+                        drop(agents);
 
-            // Load prompts for new agents
-            let prompts = match config.startup_prompts() {
-                Ok(p) => p,
-                Err(_) => HashMap::new(),
-            };
+                        if crate::injector::has_session(&session) {
+                            crate::injector::kill_session(&session);
+                            println!("  Killed session: {}", session);
+                        }
+                        if let Some(h) = handle {
+                            crate::injector::close_terminal_handle(h);
+                        }
 
-            // Spawn the group - we need access to internal methods...
-            // For now, use spawn_all-like logic via registry
-            registry.spawn_and_prompt_group(&wg_config, &prompts).await;
-        }
-
-        logger.log(Event::WorkersScaled {
-            group_id: group.id.clone(),
-            old_count,
-            new_count,
-        });
-        println!("  Scaled up to {} teams.", new_count);
-    } else {
-        // Scale down: kill highest ordinal instances
-        println!("  Scaling down {} → {} teams...", old_count, new_count);
-
-        for instance in (new_count + 1)..=old_count {
-            // Find and kill agents belonging to this instance
-            for agent_id in &group.agents {
-                let expanded_id = crate::config::expand_agent_id(agent_id, instance, old_count);
-                let agents = registry.agents.lock().await;
-                if let Some(state) = agents.get(&expanded_id) {
-                    let session = state.tmux_session.clone();
-                    let handle = state.terminal_handle;
-                    drop(agents);
-
-                    // Kill the tmux session (shared by group)
-                    if crate::injector::has_session(&session) {
-                        crate::injector::kill_session(&session);
-                        println!("  Killed session: {}", session);
+                        registry.agents.lock().await.remove(&expanded_id);
+                    } else {
+                        drop(agents);
                     }
-                    if let Some(h) = handle {
-                        crate::injector::close_terminal_handle(h);
-                    }
-
-                    // Remove from registry
-                    registry.agents.lock().await.remove(&expanded_id);
-                } else {
-                    drop(agents);
                 }
             }
+
+            logger.log(Event::WorkersScaled {
+                group_id: group.id.clone(),
+                old_count,
+                new_count,
+            });
+            println!("  Scaled down to {} teams.", new_count);
         }
 
-        logger.log(Event::WorkersScaled {
-            group_id: group.id.clone(),
-            old_count,
-            new_count,
-        });
-        println!("  Scaled down to {} teams.", new_count);
+        // After scaling, loop back to show updated group list
     }
 }
 
@@ -477,7 +512,68 @@ async fn handle_send_system_prompts(
 }
 
 // ---------------------------------------------------------------------------
-// 6) Status
+// 6) Restart agent
+// ---------------------------------------------------------------------------
+
+async fn handle_restart_agent(
+    registry: &Registry,
+    lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
+) {
+    loop {
+        let agents = registry.agents.lock().await;
+        if agents.is_empty() {
+            println!("\n  No agents registered.");
+            return;
+        }
+
+        let mut sorted: Vec<_> = agents.iter().collect();
+        sorted.sort_by_key(|(id, _)| (*id).clone());
+
+        println!("\n  Agents:");
+        for (i, (id, state)) in sorted.iter().enumerate() {
+            println!(
+                "  {}) {} — {} / {}",
+                i + 1,
+                id,
+                state.status,
+                state.activity,
+            );
+        }
+
+        let agent_ids: Vec<String> = sorted.iter().map(|(id, _)| (*id).clone()).collect();
+        drop(agents);
+
+        let input =
+            match prompt_line(lines, "\n  Enter # to restart, or Enter to go back: ").await {
+                Some(s) => s,
+                None => return,
+            };
+
+        if is_back(&input) {
+            return;
+        }
+
+        let idx = match input.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= agent_ids.len() => n - 1,
+            _ => {
+                println!("  Invalid selection.");
+                continue;
+            }
+        };
+
+        let agent_id = &agent_ids[idx];
+        println!("  Restarting {}...", agent_id);
+        match registry.restart_agent(agent_id).await {
+            Ok(()) => println!("  {} restarted successfully.", agent_id),
+            Err(e) => eprintln!("  Failed to restart {}: {e}", agent_id),
+        }
+
+        // After restarting, loop back to show updated agent list
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7) Status
 // ---------------------------------------------------------------------------
 
 async fn handle_status(registry: &Registry) {
@@ -511,5 +607,8 @@ async fn handle_status(registry: &Registry) {
     }
 
     let paused = registry.is_paused();
-    println!("\n  Orchestrator: {}", if paused { "PAUSED" } else { "RUNNING" });
+    println!(
+        "\n  Orchestrator: {}",
+        if paused { "PAUSED" } else { "RUNNING" }
+    );
 }
