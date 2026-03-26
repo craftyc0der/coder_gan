@@ -734,6 +734,30 @@ impl ProjectConfig {
     /// Build the list of WorkerGroupConfigs for the supervisor to spawn as
     /// grouped tmux sessions.  Each config describes one session instance.
     pub fn worker_group_configs(&self) -> Vec<WorkerGroupConfig> {
+        let mut groups = Vec::new();
+        for group in &self.worker_groups {
+            let instances: Vec<u32> = (1..=group.count).collect();
+            groups.extend(self.worker_group_configs_for_instances(&group.id, &instances, group.count));
+        }
+
+        groups
+    }
+
+    /// Build resolved WorkerGroupConfigs for selected instances of one group.
+    ///
+    /// This is used by the interactive menu when scaling groups at runtime so
+    /// those newly spawned instances use the same worktree-aware resolution as
+    /// the initial orchestrator launch path.
+    pub fn worker_group_configs_for_instances(
+        &self,
+        group_id: &str,
+        instances: &[u32],
+        total: u32,
+    ) -> Vec<WorkerGroupConfig> {
+        let Some(group) = self.worker_groups.iter().find(|group| group.id == group_id) else {
+            return Vec::new();
+        };
+
         let agent_map: HashMap<&str, &AgentEntry> =
             self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
 
@@ -745,47 +769,71 @@ impl ProjectConfig {
             .collect();
 
         let mut groups = Vec::new();
-        for group in &self.worker_groups {
-            for instance in 1..=group.count {
-                let session = self.group_session_for(&group.id, instance, group.count);
-                let mut members = Vec::new();
-                for (pane_idx, agent_id) in group.agents.iter().enumerate() {
-                    let a = match agent_map.get(agent_id.as_str()) {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    let expanded_id = expand_agent_id(agent_id, instance, group.count);
-                    let tmux_target = format!("{}:0.{}", session, pane_idx);
-                    let working_dir = wt_map
-                        .get(expanded_id.as_str())
-                        .or_else(|| wt_map.get(agent_id.as_str()))
-                        .map(|wt| wt.worktree_path.clone());
-                    let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
-                    let terminal = a.terminal.clone().unwrap_or_else(|| self.terminal.clone());
-                    members.push(AgentConfig {
-                        agent_id: expanded_id.clone(),
-                        cli_command: a.command.clone(),
-                        tmux_session: session.clone(),
-                        tmux_target,
-                        inbox_dir: self.messages_dir.join(format!("to_{}", expanded_id)),
-                        allowed_write_dirs: a
-                            .allowed_write_dirs
-                            .iter()
-                            .map(|d| base_root.join(d))
-                            .collect(),
-                        working_dir,
-                        terminal,
-                    });
-                }
-                groups.push(WorkerGroupConfig {
-                    group_id: group.id.clone(),
-                    session_name: session,
-                    layout: group.layout.clone(),
-                    members,
+        for instance in instances {
+            let session = self.group_session_for(&group.id, *instance, total);
+            let mut members = Vec::new();
+            for (pane_idx, agent_id) in group.agents.iter().enumerate() {
+                let a = match agent_map.get(agent_id.as_str()) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let expanded_id = expand_agent_id(agent_id, *instance, total);
+                let tmux_target = format!("{}:0.{}", session, pane_idx);
+                let working_dir = wt_map
+                    .get(expanded_id.as_str())
+                    .or_else(|| wt_map.get(agent_id.as_str()))
+                    .map(|wt| wt.worktree_path.clone());
+                let base_root = working_dir.as_deref().unwrap_or(&self.project_root);
+                let terminal = a.terminal.clone().unwrap_or_else(|| self.terminal.clone());
+                members.push(AgentConfig {
+                    agent_id: expanded_id.clone(),
+                    cli_command: a.command.clone(),
+                    tmux_session: session.clone(),
+                    tmux_target,
+                    inbox_dir: self.messages_dir.join(format!("to_{}", expanded_id)),
+                    allowed_write_dirs: a
+                        .allowed_write_dirs
+                        .iter()
+                        .map(|d| base_root.join(d))
+                        .collect(),
+                    working_dir,
+                    terminal,
                 });
             }
+            groups.push(WorkerGroupConfig {
+                group_id: group.id.clone(),
+                session_name: session,
+                layout: group.layout.clone(),
+                members,
+            });
         }
+
         groups
+    }
+
+    /// Build worktree specs for selected instances of a worker group.
+    pub fn worktree_specs_for_group_instances(
+        &self,
+        group_id: &str,
+        instances: &[u32],
+        total: u32,
+    ) -> Vec<crate::worktree::WorktreeSpec> {
+        let Some(group) = self.worker_groups.iter().find(|group| group.id == group_id) else {
+            return Vec::new();
+        };
+
+        instances
+            .iter()
+            .map(|instance| crate::worktree::WorktreeSpec {
+                worktree_id: expand_agent_id(&group.id, *instance, total),
+                agent_ids: group
+                    .agents
+                    .iter()
+                    .map(|agent_id| expand_agent_id(agent_id, *instance, total))
+                    .collect(),
+                branch_override: None,
+            })
+            .collect()
     }
 
     /// Read and render startup prompt files, substituting template variables.

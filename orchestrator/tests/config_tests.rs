@@ -860,6 +860,67 @@ fn worker_group_configs_vertical_layout_propagated() {
     assert_eq!(groups[0].layout, SplitDirection::Vertical);
 }
 
+#[test]
+fn worker_group_configs_for_instances_use_worktree_paths() {
+    let tmp = TempDir::new().unwrap();
+    let mut config = make_config_with_groups(
+        &tmp,
+        make_group_agents(),
+        vec![make_worker_group(3)],
+    );
+
+    let worktree_root = tmp.path().join("worker-3-worktree");
+    config.worktree_feature = Some("feature-x".into());
+    config.worktrees = vec![
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "coder-3".into(),
+            branch: "feature-x/worker-3".into(),
+            worktree_path: worktree_root.clone(),
+        },
+        orchestrator::worktree::AgentWorktree {
+            agent_id: "tester-3".into(),
+            branch: "feature-x/worker-3".into(),
+            worktree_path: worktree_root.clone(),
+        },
+    ];
+
+    let groups = config.worker_group_configs_for_instances("worker", &[3], 3);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].session_name, "testproject-feature-x-worker-3");
+
+    let coder = groups[0]
+        .members
+        .iter()
+        .find(|member| member.agent_id == "coder-3")
+        .unwrap();
+    assert_eq!(coder.working_dir.as_deref(), Some(worktree_root.as_path()));
+    assert_eq!(coder.allowed_write_dirs[0], worktree_root.join("src/"));
+
+    let tester = groups[0]
+        .members
+        .iter()
+        .find(|member| member.agent_id == "tester-3")
+        .unwrap();
+    assert_eq!(tester.working_dir.as_deref(), Some(worktree_root.as_path()));
+    assert_eq!(tester.allowed_write_dirs[0], worktree_root.join("tests/"));
+}
+
+#[test]
+fn worktree_specs_for_group_instances_expand_group_and_agent_ids() {
+    let tmp = TempDir::new().unwrap();
+    let config = make_config_with_groups(
+        &tmp,
+        make_group_agents(),
+        vec![make_worker_group(3)],
+    );
+
+    let specs = config.worktree_specs_for_group_instances("worker", &[3], 3);
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].worktree_id, "worker-3");
+    assert_eq!(specs[0].agent_ids, vec!["coder-3", "tester-3"]);
+    assert_eq!(specs[0].branch_override, None);
+}
+
 // ---------------------------------------------------------------------------
 // startup_prompts with grouped agents
 // ---------------------------------------------------------------------------

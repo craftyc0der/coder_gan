@@ -83,7 +83,7 @@ fn highest_instances_to_remove(live_instances: &[u32], target_count: u32) -> Vec
 pub async fn run_menu(
     registry: Registry,
     logger: Arc<Logger>,
-    config: &ProjectConfig,
+    config: &mut ProjectConfig,
 ) {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -340,7 +340,7 @@ async fn handle_list_messages(
 async fn handle_modify_workers(
     registry: &Registry,
     logger: &Logger,
-    config: &ProjectConfig,
+    config: &mut ProjectConfig,
     lines: &mut tokio::io::Lines<BufReader<tokio::io::Stdin>>,
 ) {
     if config.worker_groups.is_empty() {
@@ -380,8 +380,12 @@ async fn handle_modify_workers(
             }
         };
 
-        let group = &config.worker_groups[group_idx];
-        let live_instances = live_group_instances(registry, group).await;
+        let (group_id, group_agents) = {
+            let group = &config.worker_groups[group_idx];
+            (group.id.clone(), group.agents.clone())
+        };
+
+        let live_instances = live_group_instances(registry, &config.worker_groups[group_idx]).await;
         let old_count = live_instances.len() as u32;
 
         let count_input = match prompt_line(
@@ -418,64 +422,51 @@ async fn handle_modify_workers(
             // Scale up: spawn new group instances
             println!("  Scaling up {} → {} teams...", old_count, new_count);
 
-            for instance in (old_count + 1)..=new_count {
-                let session = config.group_session_for(&group.id, instance, new_count);
+            let new_instances: Vec<u32> = ((old_count + 1)..=new_count).collect();
 
-                let agent_map: HashMap<&str, &crate::config::AgentEntry> =
-                    config.agents.iter().map(|a| (a.id.as_str(), a)).collect();
-
-                let mut members = Vec::new();
-                for (pane_idx, agent_id) in group.agents.iter().enumerate() {
-                    let a = match agent_map.get(agent_id.as_str()) {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    let expanded_id =
-                        crate::config::expand_agent_id(agent_id, instance, new_count);
-                    let tmux_target = format!("{}:0.{}", session, pane_idx);
-                    let base_root = &config.project_root;
-                    let terminal = a.terminal.clone().unwrap_or_else(|| config.terminal.clone());
-                    members.push(crate::supervisor::AgentConfig {
-                        agent_id: expanded_id.clone(),
-                        cli_command: a.command.clone(),
-                        tmux_session: session.clone(),
-                        tmux_target,
-                        inbox_dir: config.messages_dir.join(format!("to_{}", expanded_id)),
-                        allowed_write_dirs: a
-                            .allowed_write_dirs
-                            .iter()
-                            .map(|d| base_root.join(d))
-                            .collect(),
-                        working_dir: None,
-                        terminal,
-                    });
+            if let Some(feature_name) = config.worktree_feature.clone() {
+                let specs = config.worktree_specs_for_group_instances(&group_id, &new_instances, new_count);
+                match crate::worktree::setup_worktrees(&config.project_root, &feature_name, &specs) {
+                    Ok(mut worktrees) => {
+                        let new_agent_ids: HashSet<String> =
+                            worktrees.iter().map(|wt| wt.agent_id.clone()).collect();
+                        config
+                            .worktrees
+                            .retain(|wt| !new_agent_ids.contains(&wt.agent_id));
+                        config.worktrees.append(&mut worktrees);
+                    }
+                    Err(e) => {
+                        eprintln!("  Failed to create worktrees: {e}");
+                        continue;
+                    }
                 }
+            }
 
-                for m in &members {
+            if let Some(group) = config.worker_groups.get_mut(group_idx) {
+                group.count = new_count;
+            }
+
+            let group_configs =
+                config.worker_group_configs_for_instances(&group_id, &new_instances, new_count);
+            let prompts = match config.startup_prompts_for_group_instances(
+                &group_id,
+                &new_instances,
+                new_count,
+            ) {
+                Ok(p) => p,
+                Err(_) => HashMap::new(),
+            };
+
+            for wg_config in group_configs {
+                for m in &wg_config.members {
                     let _ = std::fs::create_dir_all(&m.inbox_dir);
                 }
-
-                let wg_config = crate::supervisor::WorkerGroupConfig {
-                    group_id: format!("{}-{}", group.id, instance),
-                    session_name: session,
-                    layout: group.layout.clone(),
-                    members,
-                };
-
-                let prompts = match config.startup_prompts_for_group_instances(
-                    &group.id,
-                    &[instance],
-                    new_count,
-                ) {
-                    Ok(p) => p,
-                    Err(_) => HashMap::new(),
-                };
 
                 registry.spawn_and_prompt_group(&wg_config, &prompts).await;
             }
 
             logger.log(Event::WorkersScaled {
-                group_id: group.id.clone(),
+                group_id: group_id.clone(),
                 old_count,
                 new_count,
             });
@@ -493,7 +484,7 @@ async fn handle_modify_workers(
                 let agents = registry.agents.lock().await;
                 for instance in &instances_to_remove {
                     for (agent_id, state) in agents.iter() {
-                        let matches_instance = group.agents.iter().any(|base_agent_id| {
+                        let matches_instance = group_agents.iter().any(|base_agent_id| {
                             parse_group_instance(base_agent_id, agent_id) == Some(*instance)
                         });
                         if matches_instance {
@@ -524,8 +515,16 @@ async fn handle_modify_workers(
                 .unregister_group_runtime(&agent_ids_to_remove, &session_names)
                 .await;
 
+            let removed_agent_ids: HashSet<String> = agent_ids_to_remove.iter().cloned().collect();
+            config
+                .worktrees
+                .retain(|wt| !removed_agent_ids.contains(&wt.agent_id));
+            if let Some(group) = config.worker_groups.get_mut(group_idx) {
+                group.count = new_count;
+            }
+
             logger.log(Event::WorkersScaled {
-                group_id: group.id.clone(),
+                group_id: group_id.clone(),
                 old_count,
                 new_count,
             });

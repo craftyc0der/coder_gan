@@ -238,7 +238,7 @@ fn cmd_init(project_path: &Path) {
 // `run` subcommand — full orchestrator
 // ---------------------------------------------------------------------------
 
-async fn run_orchestrator(config: ProjectConfig) {
+async fn run_orchestrator(mut config: ProjectConfig) {
     config.ensure_dirs().expect("failed to create directories");
 
     // Print non-blocking warnings for known configuration issues
@@ -435,7 +435,7 @@ async fn run_orchestrator(config: ProjectConfig) {
     let menu_registry = registry.clone();
     let menu_logger = logger.clone();
     tokio::select! {
-        _ = menu::run_menu(menu_registry, menu_logger, &config) => {},
+        _ = menu::run_menu(menu_registry, menu_logger, &mut config) => {},
         _ = tokio::signal::ctrl_c() => {},
     }
 
