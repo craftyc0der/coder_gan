@@ -21,8 +21,8 @@ fn make_executable(path: &Path) {
     fs::set_permissions(path, perms).unwrap();
 }
 
-#[tokio::test]
-async fn inject_uses_bracketed_paste_and_enter() {
+#[test]
+fn inject_uses_bracketed_paste_and_enter() {
     let tmp = TempDir::new().unwrap();
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -37,7 +37,7 @@ async fn inject_uses_bracketed_paste_and_enter() {
     .unwrap();
     make_executable(&tmux_path);
 
-    let (old_path, old_tmux_log) = {
+    let result = {
         let _guard = ENV_LOCK.lock().unwrap();
         let old_path = std::env::var("PATH").ok();
         let old_tmux_log = std::env::var("TMUX_LOG").ok();
@@ -50,13 +50,10 @@ async fn inject_uses_bracketed_paste_and_enter() {
             ),
         );
         std::env::set_var("TMUX_LOG", &log_path);
-        (old_path, old_tmux_log)
-    };
 
-    let result = inject("demo-session", "hello world").await;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(inject("demo-session", "hello world"));
 
-    {
-        let _guard = ENV_LOCK.lock().unwrap();
         match old_path {
             Some(value) => std::env::set_var("PATH", value),
             None => std::env::remove_var("PATH"),
@@ -65,7 +62,9 @@ async fn inject_uses_bracketed_paste_and_enter() {
             Some(value) => std::env::set_var("TMUX_LOG", value),
             None => std::env::remove_var("TMUX_LOG"),
         }
-    }
+
+        result
+    };
 
     result.unwrap();
 

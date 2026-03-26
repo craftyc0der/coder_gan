@@ -154,6 +154,23 @@ pub enum Event {
         agent_id: String,
     },
 
+    // Menu / operator events
+    #[serde(rename = "orchestrator_paused")]
+    OrchestratorPaused,
+
+    #[serde(rename = "orchestrator_unpaused")]
+    OrchestratorUnpaused,
+
+    #[serde(rename = "system_prompts_resent")]
+    SystemPromptsResent,
+
+    #[serde(rename = "workers_scaled")]
+    WorkersScaled {
+        group_id: String,
+        old_count: u32,
+        new_count: u32,
+    },
+
     // Slack agent events
     #[cfg(feature = "slack")]
     #[serde(rename = "slack_connected")]

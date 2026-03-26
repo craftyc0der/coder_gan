@@ -916,6 +916,88 @@ impl ProjectConfig {
         Ok(prompts)
     }
 
+    /// Render startup prompts for specific instances of a worker group using
+    /// the provided live total instance count.
+    pub fn startup_prompts_for_group_instances(
+        &self,
+        group_id: &str,
+        instances: &[u32],
+        total: u32,
+    ) -> Result<HashMap<String, String>, ConfigError> {
+        let Some(group) = self.worker_groups.iter().find(|group| group.id == group_id) else {
+            return Ok(HashMap::new());
+        };
+
+        let mut prompts = HashMap::new();
+        let agent_map: HashMap<&str, &AgentEntry> =
+            self.agents.iter().map(|a| (a.id.as_str(), a)).collect();
+        let (worker_inboxes_rendered, worker_instance_vars) = self.worker_inbox_template_vars();
+        let wt_map: HashMap<&str, &crate::worktree::AgentWorktree> = self
+            .worktrees
+            .iter()
+            .map(|wt| (wt.agent_id.as_str(), wt))
+            .collect();
+
+        for instance in instances {
+            for agent_id in &group.agents {
+                let a = match agent_map.get(agent_id.as_str()) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let prompt_path = self.dot_dir.join(&a.prompt_file);
+                if !prompt_path.exists() {
+                    return Err(ConfigError::MissingPromptFile(prompt_path));
+                }
+                let raw = std::fs::read_to_string(&prompt_path)?;
+                let expanded_id = expand_agent_id(agent_id, *instance, total);
+
+                let worktree = wt_map
+                    .get(expanded_id.as_str())
+                    .or_else(|| wt_map.get(agent_id.as_str()))
+                    .copied();
+
+                let peer_inboxes: Vec<String> = group
+                    .agents
+                    .iter()
+                    .filter(|peer| peer.as_str() != agent_id.as_str())
+                    .map(|peer| {
+                        let peer_expanded = expand_agent_id(peer, *instance, total);
+                        format!("- {}/to_{}/", self.prompt_messages_dir(), peer_expanded)
+                    })
+                    .collect();
+
+                let peer_ids: Vec<String> = group
+                    .agents
+                    .iter()
+                    .filter(|peer| peer.as_str() != agent_id.as_str())
+                    .map(|peer| expand_agent_id(peer, *instance, total))
+                    .collect();
+
+                let context = self.prompt_template_context(
+                    &expanded_id,
+                    *instance,
+                    total,
+                    peer_ids,
+                    peer_inboxes,
+                    &worker_inboxes_rendered,
+                    &worker_instance_vars,
+                    worktree,
+                );
+
+                let worktree_prompt = if self.worktree_feature.is_some() {
+                    self.load_worktree_prompt(a, &context)?
+                } else {
+                    String::new()
+                };
+
+                let rendered = render_prompt_template(raw, &context, &worktree_prompt);
+                prompts.insert(expanded_id, rendered);
+            }
+        }
+
+        Ok(prompts)
+    }
+
     /// Build resolved timer configs for all agents.
     /// Stores paths and template variables so prompts are read fresh at fire time.
     pub fn resolved_timers(&self) -> Result<Vec<ResolvedTimer>, ConfigError> {

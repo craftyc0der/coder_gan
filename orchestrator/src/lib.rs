@@ -1,6 +1,7 @@
 pub mod config;
 pub mod injector;
 pub mod logger;
+pub mod menu;
 pub mod scope;
 #[cfg(feature = "slack")]
 pub mod slack;
