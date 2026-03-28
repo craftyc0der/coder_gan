@@ -304,6 +304,7 @@ pub struct ProjectConfig {
     pub log_dir: PathBuf,
     pub state_path: PathBuf,
     pub transcript_dir: PathBuf,
+    pub pids_dir: PathBuf,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
     /// Project-wide default terminal emulator preference.
@@ -508,6 +509,7 @@ impl ProjectConfig {
         let log_dir = dot_dir.join("runtime/logs");
         let state_path = log_dir.join("state.json");
         let transcript_dir = log_dir.join("spike_transcripts");
+        let pids_dir = dot_dir.join("runtime/pids");
 
         // Validate slack agents
         for agent in &agents_toml.agents {
@@ -597,6 +599,7 @@ impl ProjectConfig {
             log_dir,
             state_path,
             transcript_dir,
+            pids_dir,
             terminal: agents_toml.terminal,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,

@@ -258,6 +258,14 @@ pub struct AgentState {
     /// Hash of last captured pane content for activity detection.
     #[serde(skip)]
     pub last_pane_hash: Option<u64>,
+    /// The name used to identify this agent's CLI session (e.g. passed via
+    /// `--name` for Claude). Used to resume the session after a restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    /// The raw session UUID returned by the agent CLI after startup.
+    /// Populated later once extraction is implemented; `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn default_activity() -> AgentActivity {
@@ -288,6 +296,7 @@ pub struct Registry {
     startup_prompts: Arc<Mutex<HashMap<String, String>>>,
     worker_groups: Arc<Mutex<Vec<WorkerGroupConfig>>>,
     state_path: PathBuf,
+    pids_dir: PathBuf,
     log_dir: PathBuf,
     logger: Arc<Logger>,
     injector: Arc<dyn InjectorOps>,
@@ -299,15 +308,24 @@ impl Registry {
     pub fn new(
         configs: Vec<AgentConfig>,
         state_path: PathBuf,
+        pids_dir: PathBuf,
         log_dir: PathBuf,
         logger: Arc<Logger>,
     ) -> Self {
-        Self::new_with_injector(configs, state_path, log_dir, logger, Arc::new(RealInjector))
+        Self::new_with_injector(
+            configs,
+            state_path,
+            pids_dir,
+            log_dir,
+            logger,
+            Arc::new(RealInjector),
+        )
     }
 
     pub fn new_with_injector(
         configs: Vec<AgentConfig>,
         state_path: PathBuf,
+        pids_dir: PathBuf,
         log_dir: PathBuf,
         logger: Arc<Logger>,
         injector: Arc<dyn InjectorOps>,
@@ -322,6 +340,7 @@ impl Registry {
             startup_prompts: Arc::new(Mutex::new(HashMap::new())),
             worker_groups: Arc::new(Mutex::new(Vec::new())),
             state_path,
+            pids_dir,
             log_dir,
             logger,
             injector,
@@ -487,6 +506,7 @@ impl Registry {
             Ok(terminal_handle) => {
                 let mut agents = self.agents.lock().await;
                 for member in &group.members {
+                    let session_name = member.tmux_session.clone();
                     let state = AgentState {
                         agent_id: member.agent_id.clone(),
                         tmux_session: member.tmux_session.clone(),
@@ -499,7 +519,15 @@ impl Registry {
                         restart_timestamps: Vec::new(),
                         activity: AgentActivity::Unknown,
                         last_pane_hash: None,
+                        session_name: Some(session_name.clone()),
+                        session_id: None,
                     };
+                    self.write_session_file(
+                        &member.agent_id,
+                        &member.cli_command,
+                        &session_name,
+                        None,
+                    );
                     agents.insert(member.agent_id.clone(), state);
                     self.logger.log(Event::AgentSpawn {
                         agent_id: member.agent_id.clone(),
@@ -536,6 +564,10 @@ impl Registry {
             .spawn_session(&config.tmux_session, &effective_cmd, &config.terminal)
         {
             Ok(terminal_handle) => {
+                // Use the tmux session name as the stable session identifier.
+                // For Claude this matches `--name`; for other agents it's a
+                // human-readable key we can correlate with their session files.
+                let session_name = config.tmux_session.clone();
                 let state = AgentState {
                     agent_id: config.agent_id.clone(),
                     tmux_session: config.tmux_session.clone(),
@@ -548,7 +580,10 @@ impl Registry {
                     restart_timestamps: Vec::new(),
                     activity: AgentActivity::Unknown,
                     last_pane_hash: None,
+                    session_name: Some(session_name.clone()),
+                    session_id: None,
                 };
+                self.write_session_file(&config.agent_id, &config.cli_command, &session_name, None);
                 self.agents
                     .lock()
                     .await
@@ -561,6 +596,30 @@ impl Registry {
             }
             Err(e) => {
                 eprintln!("[supervisor] failed to spawn {}: {e}", config.agent_id);
+            }
+        }
+    }
+
+    /// Write (or overwrite) `runtime/pids/{agent_id}.session.json` with the
+    /// agent's identity and session handle so it can be resumed later.
+    fn write_session_file(
+        &self,
+        agent_id: &str,
+        cli_command: &str,
+        session_name: &str,
+        session_id: Option<&str>,
+    ) {
+        let path = self.pids_dir.join(format!("{agent_id}.session.json"));
+        let payload = serde_json::json!({
+            "agent_id": agent_id,
+            "cli_command": cli_command,
+            "session_name": session_name,
+            "session_id": session_id,
+            "spawned_at": Utc::now().to_rfc3339(),
+        });
+        if let Ok(json) = serde_json::to_string_pretty(&payload) {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("[supervisor] failed to write session file for {agent_id}: {e}");
             }
         }
     }

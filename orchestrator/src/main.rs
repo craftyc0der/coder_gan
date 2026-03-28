@@ -296,6 +296,7 @@ async fn run_orchestrator(mut config: ProjectConfig) {
     let registry = Registry::new(
         agent_cfgs,
         config.state_path.clone(),
+        config.pids_dir.clone(),
         config.log_dir.clone(),
         logger.clone(),
     );
