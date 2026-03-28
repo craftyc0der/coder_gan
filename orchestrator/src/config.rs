@@ -305,6 +305,10 @@ pub struct ProjectConfig {
     pub state_path: PathBuf,
     pub transcript_dir: PathBuf,
     pub pids_dir: PathBuf,
+    pub sessions_dir: PathBuf,
+    /// Populated at runtime (not from TOML) when `--resume <name>` is used.
+    /// Maps agent_id → vendor session ID to pass as the resume handle.
+    pub resume_ids: std::collections::HashMap<String, String>,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
     /// Project-wide default terminal emulator preference.
@@ -510,6 +514,7 @@ impl ProjectConfig {
         let state_path = log_dir.join("state.json");
         let transcript_dir = log_dir.join("spike_transcripts");
         let pids_dir = dot_dir.join("runtime/pids");
+        let sessions_dir = dot_dir.join("runtime/sessions");
 
         // Validate slack agents
         for agent in &agents_toml.agents {
@@ -600,6 +605,8 @@ impl ProjectConfig {
             state_path,
             transcript_dir,
             pids_dir,
+            sessions_dir,
+            resume_ids: std::collections::HashMap::new(),
             terminal: agents_toml.terminal,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,
@@ -640,6 +647,7 @@ impl ProjectConfig {
         std::fs::create_dir_all(&self.log_dir)?;
         std::fs::create_dir_all(&self.transcript_dir)?;
         std::fs::create_dir_all(self.dot_dir.join("runtime/pids"))?;
+        std::fs::create_dir_all(&self.sessions_dir)?;
         Ok(())
     }
 
@@ -688,6 +696,7 @@ impl ProjectConfig {
                     .collect(),
                 working_dir,
                 terminal,
+                resume_session_id: self.resume_ids.get(&a.id).cloned(),
             });
         }
 
@@ -726,6 +735,7 @@ impl ProjectConfig {
                             .collect(),
                         working_dir,
                         terminal,
+                        resume_session_id: self.resume_ids.get(&expanded_id).cloned(),
                     });
                 }
             }
@@ -801,6 +811,7 @@ impl ProjectConfig {
                         .collect(),
                     working_dir,
                     terminal,
+                    resume_session_id: self.resume_ids.get(&expanded_id).cloned(),
                 });
             }
             groups.push(WorkerGroupConfig {

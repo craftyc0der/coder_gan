@@ -13,9 +13,25 @@ use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
 fn effective_command(config: &AgentConfig) -> String {
+    let adapter = crate::session::adapter_for_command(&config.cli_command);
+
+    let base_cmd = if let Some(ref session_id) = config.resume_session_id {
+        // Resuming: let the adapter build the resume command.
+        adapter.resume_command(&config.cli_command, session_id)
+    } else {
+        // Fresh spawn: append any adapter-supplied flags (e.g. `--name` for Claude).
+        let tmux_session = &config.tmux_session;
+        let extra = adapter.spawn_extra_args(tmux_session);
+        if extra.is_empty() {
+            config.cli_command.clone()
+        } else {
+            format!("{} {}", config.cli_command, extra.join(" "))
+        }
+    };
+
     match &config.working_dir {
-        Some(dir) => format!("cd {} && {}", shell_escape(dir), config.cli_command),
-        None => config.cli_command.clone(),
+        Some(dir) => format!("cd {} && {}", shell_escape(dir), base_cmd),
+        None => base_cmd,
     }
 }
 
@@ -170,6 +186,10 @@ pub struct AgentConfig {
     /// override or project-wide default).
     #[serde(skip)]
     pub terminal: crate::config::TerminalPreference,
+    /// When set, the agent should resume this vendor session ID instead of
+    /// starting fresh. Injected at runtime by `--resume`; not persisted.
+    #[serde(skip)]
+    pub resume_session_id: Option<String>,
 }
 
 /// A resolved worker group ready for the supervisor to spawn as a single
@@ -396,11 +416,21 @@ impl Registry {
     ///
     /// Worker groups are spawned first as multi-pane tmux sessions; standalone
     /// agents are then spawned each in their own session.
+    ///
+    /// If `session_name` and `sessions_dir` are both `Some`, a master session
+    /// record is written to `<sessions_dir>/<session_name>.json` after all
+    /// agents have started, enabling future resumption via `--resume`.
     pub async fn spawn_all(
         &self,
         startup_prompts: &HashMap<String, String>,
         worker_groups: &[WorkerGroupConfig],
+        session_name: Option<&str>,
+        sessions_dir: Option<&PathBuf>,
     ) {
+        // Record spawn time before Phase 1 so session-ID extraction can filter
+        // to only files written after this moment.
+        let spawn_time = std::time::SystemTime::now();
+
         // Store prompts and groups for later use by restart_agent / health_loop
         {
             let mut prompts = self.startup_prompts.lock().await;
@@ -459,6 +489,69 @@ impl Registry {
                     eprintln!("[supervisor] failed to inject startup prompt for {id}: {e}");
                 }
             }
+        }
+
+        // --- Phase 4: extract vendor session IDs and save master session file ---
+        if let (Some(name), Some(dir)) = (session_name, sessions_dir) {
+            self.save_orchestrator_session(name, dir, spawn_time).await;
+        }
+    }
+
+    /// Extract vendor session IDs for all agents and write the master session
+    /// file that `--resume <name>` will later read.
+    async fn save_orchestrator_session(
+        &self,
+        session_name: &str,
+        sessions_dir: &PathBuf,
+        spawned_after: std::time::SystemTime,
+    ) {
+        use crate::session::{adapter_for_command, AgentSessionInfo, OrchestratorSession};
+
+        let agents_snapshot = self.agents.lock().await;
+        let mut agent_sessions = HashMap::new();
+
+        for (agent_id, state) in agents_snapshot.iter() {
+            let Some(config) = self.configs.get(agent_id) else {
+                continue;
+            };
+            let sname = state
+                .session_name
+                .clone()
+                .unwrap_or_else(|| config.tmux_session.clone());
+
+            let adapter = adapter_for_command(&config.cli_command);
+            let session_id = adapter.extract_session_id(&sname, spawned_after);
+
+            // Update the per-agent pids file with the resolved session_id
+            self.write_session_file(
+                agent_id,
+                &config.cli_command,
+                &sname,
+                session_id.as_deref(),
+            );
+
+            agent_sessions.insert(
+                agent_id.clone(),
+                AgentSessionInfo {
+                    cli_command: config.cli_command.clone(),
+                    session_name: sname,
+                    session_id,
+                },
+            );
+        }
+        drop(agents_snapshot);
+
+        let orch_session = OrchestratorSession::new(session_name.to_string(), agent_sessions);
+        match orch_session.save(sessions_dir) {
+            Ok(()) => println!(
+                "[supervisor] session '{}' saved → {}",
+                session_name,
+                sessions_dir.join(format!("{session_name}.json")).display()
+            ),
+            Err(e) => eprintln!(
+                "[supervisor] failed to save session '{}': {e}",
+                session_name
+            ),
         }
     }
 

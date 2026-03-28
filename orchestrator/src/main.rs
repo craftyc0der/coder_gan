@@ -57,6 +57,15 @@ enum Commands {
         /// is used to derive per-agent branch names.
         #[arg(long)]
         branch: Option<String>,
+        /// Name this orchestrator session so it can be resumed later.
+        /// Saved to runtime/sessions/<name>.json after all agents start.
+        #[arg(long)]
+        session: Option<String>,
+        /// Resume a previously saved orchestrator session by name.
+        /// Loads runtime/sessions/<name>.json and starts each agent with its
+        /// vendor resume flag, restoring prior context.
+        #[arg(long)]
+        resume: Option<String>,
     },
     /// Show current agent health and status
     Status {
@@ -118,9 +127,32 @@ async fn main() {
                 spike::run_spike(config, agent.as_deref()).await;
             }
         }
-        Commands::Run { path, worktree, branch } => {
+        Commands::Run { path, worktree, branch, session, resume } => {
             let project_path = resolve_path(&path);
             let mut config = load_config_or_exit(&project_path);
+
+            // --resume: load saved session and inject resume IDs into config
+            if let Some(ref resume_name) = resume {
+                use orchestrator::session::OrchestratorSession;
+                match OrchestratorSession::load(&config.sessions_dir, resume_name) {
+                    Ok(saved) => {
+                        println!("Resuming session '{}'...", saved.name);
+                        for (agent_id, info) in &saved.agents {
+                            if let Some(ref id) = info.session_id {
+                                config.resume_ids.insert(agent_id.clone(), id.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error loading session '{}': {e}", resume_name);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            // Determine the effective session name for saving:
+            // --resume implies we keep the same name; --session overrides.
+            let effective_session = session.as_deref().or(resume.as_deref());
 
             // Set up worktree mode if requested
             if worktree {
@@ -197,7 +229,7 @@ async fn main() {
                 config.worktree_feature = Some(b.clone());
             }
 
-            run_orchestrator(config).await;
+            run_orchestrator(config, effective_session.map(str::to_string)).await;
         }
         Commands::Status { path } => {
             let project_path = resolve_path(&path);
@@ -238,7 +270,7 @@ fn cmd_init(project_path: &Path) {
 // `run` subcommand — full orchestrator
 // ---------------------------------------------------------------------------
 
-async fn run_orchestrator(mut config: ProjectConfig) {
+async fn run_orchestrator(mut config: ProjectConfig, session_name: Option<String>) {
     config.ensure_dirs().expect("failed to create directories");
 
     // Print non-blocking warnings for known configuration issues
@@ -312,7 +344,14 @@ async fn run_orchestrator(mut config: ProjectConfig) {
 
     // Spawn all agents with startup prompts
     println!("Spawning agents...");
-    registry.spawn_all(&prompts, &group_cfgs).await;
+    registry
+        .spawn_all(
+            &prompts,
+            &group_cfgs,
+            session_name.as_deref(),
+            Some(&config.sessions_dir),
+        )
+        .await;
     println!("All agents spawned.\n");
 
     // Spawn Slack WebSocket watchers for slack-type agents
