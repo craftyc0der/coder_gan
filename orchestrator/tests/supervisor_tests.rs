@@ -199,6 +199,7 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             allowed_write_dirs: vec![root.join("src/")],
             working_dir: None,
             terminal: Default::default(),
+            resume_session_id: None,
         },
         AgentConfig {
             agent_id: "tester".into(),
@@ -209,21 +210,31 @@ fn make_agents(tmp: &TempDir) -> Vec<AgentConfig> {
             allowed_write_dirs: vec![root.join("tests/")],
             working_dir: None,
             terminal: Default::default(),
+            resume_session_id: None,
         },
     ]
+}
+
+fn make_runtime_paths(tmp: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
+    let state_path = log_dir.join("state.json");
+    let pids_dir = tmp.path().join(".orchestrator/runtime/pids");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    std::fs::create_dir_all(&pids_dir).unwrap();
+    (log_dir, state_path, pids_dir)
 }
 
 fn make_registry(
     tmp: &TempDir,
     injector: Arc<dyn InjectorOps>,
 ) -> (Registry, Arc<Logger>, PathBuf, PathBuf) {
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let configs = make_agents(tmp);
     let registry = Registry::new_with_injector(
         configs,
         state_path.clone(),
+        pids_dir,
         log_dir.clone(),
         logger.clone(),
         injector,
@@ -245,7 +256,7 @@ async fn spawn_all_spawns_each_agent_and_records_state() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let spawned = injector.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 2);
@@ -275,7 +286,8 @@ async fn spawn_all_kills_existing_session_before_spawn() {
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[]).await });
+    let handle =
+        tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[], None, None).await });
     tokio::time::advance(Duration::from_secs(1)).await;
     handle.await.unwrap();
 
@@ -295,7 +307,8 @@ async fn spawn_all_injects_startup_prompt_after_delay() {
     let mut prompts = HashMap::new();
     prompts.insert("coder".to_string(), "hello".to_string());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&prompts, &[]).await });
+    let handle =
+        tokio::spawn(async move { registry.spawn_all(&prompts, &[], None, None).await });
     tokio::time::advance(Duration::from_secs(6)).await;
     handle.await.unwrap();
 
@@ -311,7 +324,8 @@ async fn spawn_all_without_prompt_does_not_inject() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[]).await });
+    let handle =
+        tokio::spawn(async move { registry.spawn_all(&HashMap::new(), &[], None, None).await });
     tokio::time::advance(Duration::from_secs(1)).await;
     handle.await.unwrap();
 
@@ -326,7 +340,7 @@ async fn spawn_all_spawn_failure_is_non_fatal() {
     injector.add_spawn_error_for("testproject-coder");
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let spawned = injector.spawned.lock().unwrap();
     assert_eq!(spawned.len(), 2);
@@ -340,7 +354,7 @@ async fn health_loop_alive_agent_does_not_restart() {
     injector.set_default_has_session(true);
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -362,7 +376,7 @@ async fn health_loop_dead_agent_restarts_and_logs() {
     injector.set_default_has_session(false);
 
     let (registry, _logger, log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -411,7 +425,7 @@ async fn health_loop_degrades_after_five_deaths() {
     injector.set_default_has_session(false);
 
     let (registry, _logger, log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -459,7 +473,7 @@ async fn kill_all_calls_kill_session_for_each_agent() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
     registry.kill_all().await;
 
     let killed = injector.killed.lock().unwrap();
@@ -474,7 +488,7 @@ async fn spawn_all_records_terminal_handle_when_present() {
     injector.set_terminal_handle("testproject-coder", Some(42));
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -501,7 +515,7 @@ async fn spawn_all_omits_terminal_handle_on_linux() {
     injector.set_terminal_handle("testproject-coder", Some(42));
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -520,7 +534,7 @@ async fn spawn_all_omits_terminal_handle_when_none() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let state_contents = std::fs::read_to_string(state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -541,7 +555,7 @@ async fn kill_all_with_terminal_handle_does_not_panic() {
     injector.set_terminal_handle("testproject-coder", Some(7));
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
     registry.kill_all().await;
 
     let killed = injector.killed.lock().unwrap();
@@ -580,7 +594,7 @@ async fn kill_all_after_respawn_uses_updated_terminal_handle() {
     );
 
     let (registry, _logger, _log_dir, state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -610,7 +624,7 @@ async fn session_for_returns_correct_session_name() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
     let session = registry.session_for("coder").await;
     assert_eq!(session, Some("testproject-coder".to_string()));
 }
@@ -621,7 +635,7 @@ async fn session_for_unknown_agent_returns_none() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
     let session = registry.session_for("unknown").await;
     assert_eq!(session, None);
 }
@@ -640,8 +654,9 @@ async fn session_for_grouped_agent_returns_pane_target() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -650,8 +665,9 @@ async fn session_for_grouped_agent_returns_pane_target() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -661,18 +677,18 @@ async fn session_for_grouped_agent_returns_pane_target() {
         members: vec![coder_cfg.clone(), tester_cfg],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, groups[0].members[1].clone()],
         state_path,
+        pids_dir,
         log_dir,
         logger,
         injector,
     );
 
-    registry.spawn_all(&HashMap::new(), &groups).await;
+    registry.spawn_all(&HashMap::new(), &groups, None, None).await;
 
     let session = registry.session_for("coder").await;
     assert_eq!(session, Some("testproject-worker:0.0".to_string()));
@@ -685,7 +701,7 @@ async fn transcript_loop_captures_and_appends() {
     let injector = Arc::new(MockInjector::default());
     let (registry, _logger, log_dir, _state_path) = make_registry(&tmp, injector.clone());
 
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let handle = tokio::spawn(async move { reg_clone.transcript_loop().await });
@@ -746,7 +762,7 @@ async fn transcript_loop_skips_dead_agents() {
     injector.add_spawn_error_for("testproject-tester");
 
     let (registry, _logger, _log_dir, _state_path) = make_registry(&tmp, injector.clone());
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
 
     let reg_clone = registry.clone();
     let health = tokio::spawn(async move { reg_clone.health_loop().await });
@@ -789,6 +805,7 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -797,8 +814,9 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -808,12 +826,12 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
         members: vec![coder_cfg.clone(), tester_cfg.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, tester_cfg],
         state_path.clone(),
+        pids_dir,
         log_dir,
         logger,
         injector.clone(),
@@ -823,7 +841,8 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
     prompts.insert("coder".to_string(), "hello coder".to_string());
     prompts.insert("tester".to_string(), "hello tester".to_string());
 
-    let handle = tokio::spawn(async move { registry.spawn_all(&prompts, &groups).await });
+    let handle =
+        tokio::spawn(async move { registry.spawn_all(&prompts, &groups, None, None).await });
     tokio::time::advance(Duration::from_secs(6)).await;
     handle.await.unwrap();
 
@@ -833,7 +852,10 @@ async fn spawn_all_with_worker_group_calls_spawn_group_session() {
     assert_eq!(spawned[0].0, "testproject-worker");
     assert_eq!(
         spawned[0].1,
-        format!("cd {} && claude", worktree_dir.display())
+        format!(
+            "cd {} && claude --name testproject-worker",
+            worktree_dir.display()
+        )
     );
     assert_eq!(spawned[1].0, "testproject-worker");
     assert_eq!(spawned[1].1, "codex");
@@ -860,8 +882,9 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -870,8 +893,9 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -881,18 +905,18 @@ async fn spawn_all_with_groups_records_state_for_all_members() {
         members: vec![coder_cfg.clone(), tester_cfg.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, tester_cfg],
         state_path.clone(),
+        pids_dir,
         log_dir,
         logger,
         injector,
     );
 
-    registry.spawn_all(&HashMap::new(), &groups).await;
+    registry.spawn_all(&HashMap::new(), &groups, None, None).await;
 
     let state_contents = std::fs::read_to_string(&state_path).unwrap();
     let json: serde_json::Value = serde_json::from_str(&state_contents).unwrap();
@@ -923,8 +947,9 @@ async fn kill_all_deduplicates_shared_sessions() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -933,8 +958,9 @@ async fn kill_all_deduplicates_shared_sessions() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -944,18 +970,18 @@ async fn kill_all_deduplicates_shared_sessions() {
         members: vec![coder_cfg.clone(), tester_cfg.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, tester_cfg],
         state_path,
+        pids_dir,
         log_dir,
         logger,
         injector.clone(),
     );
 
-    registry.spawn_all(&HashMap::new(), &groups).await;
+    registry.spawn_all(&HashMap::new(), &groups, None, None).await;
     registry.kill_all().await;
 
     let killed = injector.killed.lock().unwrap();
@@ -985,6 +1011,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -993,8 +1020,9 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1004,12 +1032,12 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         members: vec![coder_cfg.clone(), tester_cfg],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, groups[0].members[1].clone()],
         state_path.clone(),
+        pids_dir,
         log_dir,
         logger,
         injector.clone(),
@@ -1022,7 +1050,7 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
         let registry = registry.clone();
         let groups = groups.clone();
         let prompts = prompts.clone();
-        async move { registry.spawn_all(&prompts, &groups).await }
+        async move { registry.spawn_all(&prompts, &groups, None, None).await }
     });
     tokio::time::advance(Duration::from_secs(6)).await;
     spawn.await.unwrap();
@@ -1055,27 +1083,32 @@ async fn health_loop_respawns_dead_group_pane_and_reinjects_prompt() {
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::task::yield_now().await;
 
-    let respawned = injector.respawned.lock().unwrap();
-    assert_eq!(respawned.len(), 1);
-    assert_eq!(respawned[0].0, "testproject-worker:0.0");
-    assert_eq!(
-        respawned[0].1,
-        format!("cd {} && claude", worktree_dir.display())
-    );
-    drop(respawned);
+    {
+        let respawned = injector.respawned.lock().unwrap();
+        assert_eq!(respawned.len(), 1);
+        assert_eq!(respawned[0].0, "testproject-worker:0.0");
+        assert_eq!(
+            respawned[0].1,
+            format!(
+                "cd {} && claude --name testproject-worker",
+                worktree_dir.display()
+            )
+        );
+    }
 
-    let injected = injector.injected.lock().unwrap();
-    assert!(
-        injected
-            .iter()
-            .any(|(target, body)| target == "testproject-worker:0.0" && body == "restore coder")
-    );
-    assert!(
-        !injected
-            .iter()
-            .any(|(target, body)| target == "testproject-worker:0.1" && body == "restore coder")
-    );
-    drop(injected);
+    {
+        let injected = injector.injected.lock().unwrap();
+        assert!(
+            injected
+                .iter()
+                .any(|(target, body)| target == "testproject-worker:0.0" && body == "restore coder")
+        );
+        assert!(
+            !injected
+                .iter()
+                .any(|(target, body)| target == "testproject-worker:0.1" && body == "restore coder")
+        );
+    }
 
     let agents = registry.agents.lock().await;
     let coder_state = agents.get("coder").unwrap();
@@ -1107,8 +1140,9 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         tmux_target: "testproject-worker:0.0".into(),
         inbox_dir: messages.join("to_coder"),
         allowed_write_dirs: vec![root.join("src/")],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1117,8 +1151,9 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1128,12 +1163,12 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         members: vec![coder_cfg.clone(), tester_cfg.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg.clone(), tester_cfg.clone()],
         state_path,
+        pids_dir,
         log_dir,
         logger,
         injector.clone(),
@@ -1147,7 +1182,7 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
         let registry = registry.clone();
         let groups = groups.clone();
         let prompts = prompts.clone();
-        async move { registry.spawn_all(&prompts, &groups).await }
+        async move { registry.spawn_all(&prompts, &groups, None, None).await }
     });
     tokio::time::advance(Duration::from_secs(6)).await;
     spawn.await.unwrap();
@@ -1177,14 +1212,15 @@ async fn health_loop_restarts_dead_group_session_once_for_shared_session() {
     }
     assert!(ready, "expected a single group respawn with prompt reinjection");
 
-    let spawned = injector.spawned.lock().unwrap();
-    assert_eq!(spawned.len(), 4);
-    let worker_spawns = spawned
-        .iter()
-        .filter(|(session, _)| session == "testproject-worker")
-        .count();
-    assert_eq!(worker_spawns, 4, "group should spawn exactly twice total");
-    drop(spawned);
+    {
+        let spawned = injector.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 4);
+        let worker_spawns = spawned
+            .iter()
+            .filter(|(session, _)| session == "testproject-worker")
+            .count();
+        assert_eq!(worker_spawns, 4, "group should spawn exactly twice total");
+    }
 
     let agents = registry.agents.lock().await;
     assert_eq!(agents.get("coder").unwrap().restart_count, 1);
@@ -1212,6 +1248,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: Some(worktree_dir.clone()),
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let tester_cfg = AgentConfig {
         agent_id: "tester".into(),
@@ -1220,8 +1257,9 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         tmux_target: "testproject-worker:0.1".into(),
         inbox_dir: messages.join("to_tester"),
         allowed_write_dirs: vec![root.join("tests/")],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1231,12 +1269,12 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         members: vec![coder_cfg.clone(), tester_cfg.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_cfg, tester_cfg],
         state_path,
+        pids_dir,
         log_dir,
         logger,
         injector.clone(),
@@ -1249,7 +1287,7 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
         let registry = registry.clone();
         let groups = groups.clone();
         let prompts = prompts.clone();
-        async move { registry.spawn_all(&prompts, &groups).await }
+        async move { registry.spawn_all(&prompts, &groups, None, None).await }
     });
     tokio::time::advance(Duration::from_secs(6)).await;
     spawn.await.unwrap();
@@ -1266,7 +1304,10 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
     assert_eq!(respawned[0].0, "testproject-worker:0.0");
     assert_eq!(
         respawned[0].1,
-        format!("cd {} && claude", worktree_dir.display())
+        format!(
+            "cd {} && claude --name testproject-worker",
+            worktree_dir.display()
+        )
     );
     drop(respawned);
 
@@ -1277,6 +1318,83 @@ async fn restart_agent_uses_grouped_tmux_target_and_reinjects_prompt() {
             .any(|(target, body)| target == "testproject-worker:0.0"
                 && body == "fresh coder context")
     );
+}
+
+#[tokio::test]
+async fn spawn_all_uses_resume_command_when_resume_session_id_is_present() {
+    tokio::time::pause();
+    let tmp = TempDir::new().unwrap();
+    let injector = Arc::new(MockInjector::default());
+    let root = tmp.path().to_path_buf();
+    let messages = root.join(".orchestrator/messages");
+
+    let coder_cfg = AgentConfig {
+        agent_id: "coder".into(),
+        cli_command: "claude".into(),
+        tmux_session: "testproject-coder".into(),
+        tmux_target: "testproject-coder".into(),
+        inbox_dir: messages.join("to_coder"),
+        allowed_write_dirs: vec![root.join("src/")],
+        working_dir: None,
+        terminal: Default::default(),
+        resume_session_id: Some("resume-123".into()),
+    };
+
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
+    let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
+    let registry = Registry::new_with_injector(
+        vec![coder_cfg],
+        state_path,
+        pids_dir,
+        log_dir,
+        logger,
+        injector.clone(),
+    );
+
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
+
+    let spawned = injector.spawned.lock().unwrap();
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].0, "testproject-coder");
+    assert_eq!(spawned[0].1, "claude --resume resume-123");
+}
+
+#[tokio::test]
+async fn restart_agent_ignores_resume_session_id_and_starts_fresh() {
+    let tmp = TempDir::new().unwrap();
+    let injector = Arc::new(MockInjector::default());
+    let root = tmp.path().to_path_buf();
+    let messages = root.join(".orchestrator/messages");
+
+    let coder_cfg = AgentConfig {
+        agent_id: "coder".into(),
+        cli_command: "claude".into(),
+        tmux_session: "testproject-coder".into(),
+        tmux_target: "testproject-coder".into(),
+        inbox_dir: messages.join("to_coder"),
+        allowed_write_dirs: vec![root.join("src/")],
+        working_dir: None,
+        terminal: Default::default(),
+        resume_session_id: Some("resume-123".into()),
+    };
+
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
+    let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
+    let registry = Registry::new_with_injector(
+        vec![coder_cfg],
+        state_path,
+        pids_dir,
+        log_dir,
+        logger,
+        injector.clone(),
+    );
+
+    registry.restart_agent("coder").await.unwrap();
+
+    let respawned = injector.respawned.lock().unwrap();
+    assert_eq!(respawned.len(), 1);
+    assert_eq!(respawned[0].0, "testproject-coder");
+    assert_eq!(respawned[0].1, "claude --name testproject-coder");
 }
 
 #[tokio::test]
@@ -1294,8 +1412,9 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-coder:0.0".into(),
         inbox_dir: messages.join("to_coder-1"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let coder_2 = AgentConfig {
         agent_id: "coder-2".into(),
@@ -1304,8 +1423,9 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-coder:0.1".into(),
         inbox_dir: messages.join("to_coder-2"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
     let reviewer = AgentConfig {
         agent_id: "reviewer".into(),
@@ -1314,8 +1434,9 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         tmux_target: "testproject-reviewer".into(),
         inbox_dir: messages.join("to_reviewer"),
         allowed_write_dirs: vec![],
-            working_dir: None,
+        working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     };
 
     let groups = vec![WorkerGroupConfig {
@@ -1325,12 +1446,12 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
         members: vec![coder_1.clone(), coder_2.clone()],
     }];
 
-    let log_dir = tmp.path().join(".orchestrator/runtime/logs");
-    let state_path = log_dir.join("state.json");
+    let (log_dir, state_path, pids_dir) = make_runtime_paths(&tmp);
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
     let registry = Registry::new_with_injector(
         vec![coder_1, coder_2, reviewer],
         state_path,
+        pids_dir,
         log_dir,
         logger.clone(),
         injector.clone(),
@@ -1339,7 +1460,7 @@ async fn timer_loop_expands_grouped_include_agents_and_preserves_exact_matches()
     let spawn = tokio::spawn({
         let registry = registry.clone();
         let groups = groups.clone();
-        async move { registry.spawn_all(&HashMap::new(), &groups).await }
+        async move { registry.spawn_all(&HashMap::new(), &groups, None, None).await }
     });
     tokio::time::advance(Duration::from_secs(6)).await;
     spawn.await.unwrap();

@@ -304,7 +304,7 @@ pub fn open_terminal_window(session: &str, terminal: &TerminalPreference) -> Opt
              return id of front window\n\
              end tell"
         );
-        return Command::new("osascript")
+        Command::new("osascript")
             .args(["-e", &script])
             .output()
             .ok()
@@ -315,7 +315,7 @@ pub fn open_terminal_window(session: &str, terminal: &TerminalPreference) -> Opt
                 } else {
                     None
                 }
-            });
+            })
     }
 
     #[cfg(target_os = "linux")]

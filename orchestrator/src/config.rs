@@ -304,6 +304,11 @@ pub struct ProjectConfig {
     pub log_dir: PathBuf,
     pub state_path: PathBuf,
     pub transcript_dir: PathBuf,
+    pub pids_dir: PathBuf,
+    pub sessions_dir: PathBuf,
+    /// Populated at runtime (not from TOML) when `--resume <name>` is used.
+    /// Maps agent_id → vendor session ID to pass as the resume handle.
+    pub resume_ids: std::collections::HashMap<String, String>,
     pub agents: Vec<AgentEntry>,
     pub worker_groups: Vec<WorkerGroupEntry>,
     /// Project-wide default terminal emulator preference.
@@ -416,6 +421,7 @@ impl ProjectConfig {
         (worker_inboxes_all.join("\n"), worker_instance_vars)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prompt_template_context(
         &self,
         agent_id: &str,
@@ -508,6 +514,8 @@ impl ProjectConfig {
         let log_dir = dot_dir.join("runtime/logs");
         let state_path = log_dir.join("state.json");
         let transcript_dir = log_dir.join("spike_transcripts");
+        let pids_dir = dot_dir.join("runtime/pids");
+        let sessions_dir = dot_dir.join("runtime/sessions");
 
         // Validate slack agents
         for agent in &agents_toml.agents {
@@ -597,6 +605,9 @@ impl ProjectConfig {
             log_dir,
             state_path,
             transcript_dir,
+            pids_dir,
+            sessions_dir,
+            resume_ids: std::collections::HashMap::new(),
             terminal: agents_toml.terminal,
             agents: agents_toml.agents,
             worker_groups: agents_toml.worker_groups,
@@ -637,6 +648,7 @@ impl ProjectConfig {
         std::fs::create_dir_all(&self.log_dir)?;
         std::fs::create_dir_all(&self.transcript_dir)?;
         std::fs::create_dir_all(self.dot_dir.join("runtime/pids"))?;
+        std::fs::create_dir_all(&self.sessions_dir)?;
         Ok(())
     }
 
@@ -685,6 +697,7 @@ impl ProjectConfig {
                     .collect(),
                 working_dir,
                 terminal,
+                resume_session_id: self.resume_ids.get(&a.id).cloned(),
             });
         }
 
@@ -723,6 +736,7 @@ impl ProjectConfig {
                             .collect(),
                         working_dir,
                         terminal,
+                        resume_session_id: self.resume_ids.get(&expanded_id).cloned(),
                     });
                 }
             }
@@ -798,6 +812,7 @@ impl ProjectConfig {
                         .collect(),
                     working_dir,
                     terminal,
+                    resume_session_id: self.resume_ids.get(&expanded_id).cloned(),
                 });
             }
             groups.push(WorkerGroupConfig {
@@ -1399,23 +1414,25 @@ pub fn check_agent_command_warnings(agents: &[AgentEntry]) -> Vec<String> {
     let mut warnings = Vec::new();
     for agent in agents {
         let cmd = agent.command.as_str();
-        if cmd == "gemini" || cmd.starts_with("gemini ") {
-            if !cmd.contains("--yolo") && !cmd.contains("--approval-mode") {
-                warnings.push(format!(
-                    "Warning: Agent '{}' uses gemini without --yolo. \
-                     It may block on action confirmations.",
-                    agent.id
-                ));
-            }
+        if (cmd == "gemini" || cmd.starts_with("gemini "))
+            && !cmd.contains("--yolo")
+            && !cmd.contains("--approval-mode")
+        {
+            warnings.push(format!(
+                "Warning: Agent '{}' uses gemini without --yolo. \
+                 It may block on action confirmations.",
+                agent.id
+            ));
         }
-        if cmd == "cursor" || cmd.starts_with("cursor ") {
-            if cmd != "cursor agent" && !cmd.starts_with("cursor agent ") {
-                warnings.push(format!(
-                    "Warning: Agent '{}' uses cursor without 'agent' subcommand. \
-                     Use 'cursor agent' for CLI mode; plain 'cursor' opens the GUI.",
-                    agent.id
-                ));
-            }
+        if (cmd == "cursor" || cmd.starts_with("cursor "))
+            && cmd != "cursor agent"
+            && !cmd.starts_with("cursor agent ")
+        {
+            warnings.push(format!(
+                "Warning: Agent '{}' uses cursor without 'agent' subcommand. \
+                 Use 'cursor agent' for CLI mode; plain 'cursor' opens the GUI.",
+                agent.id
+            ));
         }
     }
     warnings

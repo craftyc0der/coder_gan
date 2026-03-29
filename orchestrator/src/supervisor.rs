@@ -12,11 +12,46 @@ use crate::config::{ResolvedTimer, SplitDirection};
 use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
-fn effective_command(config: &AgentConfig) -> String {
+fn command_with_session_mode(config: &AgentConfig, allow_resume: bool) -> String {
+    let adapter = crate::session::adapter_for_command(&config.cli_command);
+
+    let base_cmd = if allow_resume {
+        if let Some(ref session_id) = config.resume_session_id {
+        // Resuming: let the adapter build the resume command.
+            adapter.resume_command(&config.cli_command, session_id)
+        } else {
+            // Fresh spawn: append any adapter-supplied flags (e.g. `--name` for Claude).
+            let tmux_session = &config.tmux_session;
+            let extra = adapter.spawn_extra_args(tmux_session);
+            if extra.is_empty() {
+                config.cli_command.clone()
+            } else {
+                format!("{} {}", config.cli_command, extra.join(" "))
+            }
+        }
+    } else {
+        // Fresh spawn: append any adapter-supplied flags (e.g. `--name` for Claude).
+        let tmux_session = &config.tmux_session;
+        let extra = adapter.spawn_extra_args(tmux_session);
+        if extra.is_empty() {
+            config.cli_command.clone()
+        } else {
+            format!("{} {}", config.cli_command, extra.join(" "))
+        }
+    };
+
     match &config.working_dir {
-        Some(dir) => format!("cd {} && {}", shell_escape(dir), config.cli_command),
-        None => config.cli_command.clone(),
+        Some(dir) => format!("cd {} && {}", shell_escape(dir), base_cmd),
+        None => base_cmd,
     }
+}
+
+fn effective_command(config: &AgentConfig) -> String {
+    command_with_session_mode(config, true)
+}
+
+fn fresh_command(config: &AgentConfig) -> String {
+    command_with_session_mode(config, false)
 }
 
 fn shared_dot_orchestrator_dir(config: &AgentConfig) -> Option<PathBuf> {
@@ -114,12 +149,10 @@ pub fn detect_attention_pattern(content: &str, cli_command: &str) -> Option<&'st
         .collect::<Vec<_>>()
         .join("\n");
 
-    for pattern in attention_patterns(cli_command) {
-        if tail.contains(pattern) {
-            return Some(pattern);
-        }
-    }
-    None
+    attention_patterns(cli_command)
+        .iter()
+        .find(|pattern| tail.contains(**pattern))
+        .copied()
 }
 
 /// Print a high-visibility attention banner to the orchestrator terminal.
@@ -170,6 +203,10 @@ pub struct AgentConfig {
     /// override or project-wide default).
     #[serde(skip)]
     pub terminal: crate::config::TerminalPreference,
+    /// When set, the agent should resume this vendor session ID instead of
+    /// starting fresh. Injected at runtime by `--resume`; not persisted.
+    #[serde(skip)]
+    pub resume_session_id: Option<String>,
 }
 
 /// A resolved worker group ready for the supervisor to spawn as a single
@@ -258,6 +295,14 @@ pub struct AgentState {
     /// Hash of last captured pane content for activity detection.
     #[serde(skip)]
     pub last_pane_hash: Option<u64>,
+    /// The name used to identify this agent's CLI session (e.g. passed via
+    /// `--name` for Claude). Used to resume the session after a restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    /// The raw session UUID returned by the agent CLI after startup.
+    /// Populated later once extraction is implemented; `None` until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn default_activity() -> AgentActivity {
@@ -288,6 +333,7 @@ pub struct Registry {
     startup_prompts: Arc<Mutex<HashMap<String, String>>>,
     worker_groups: Arc<Mutex<Vec<WorkerGroupConfig>>>,
     state_path: PathBuf,
+    pids_dir: PathBuf,
     log_dir: PathBuf,
     logger: Arc<Logger>,
     injector: Arc<dyn InjectorOps>,
@@ -299,15 +345,24 @@ impl Registry {
     pub fn new(
         configs: Vec<AgentConfig>,
         state_path: PathBuf,
+        pids_dir: PathBuf,
         log_dir: PathBuf,
         logger: Arc<Logger>,
     ) -> Self {
-        Self::new_with_injector(configs, state_path, log_dir, logger, Arc::new(RealInjector))
+        Self::new_with_injector(
+            configs,
+            state_path,
+            pids_dir,
+            log_dir,
+            logger,
+            Arc::new(RealInjector),
+        )
     }
 
     pub fn new_with_injector(
         configs: Vec<AgentConfig>,
         state_path: PathBuf,
+        pids_dir: PathBuf,
         log_dir: PathBuf,
         logger: Arc<Logger>,
         injector: Arc<dyn InjectorOps>,
@@ -322,6 +377,7 @@ impl Registry {
             startup_prompts: Arc::new(Mutex::new(HashMap::new())),
             worker_groups: Arc::new(Mutex::new(Vec::new())),
             state_path,
+            pids_dir,
             log_dir,
             logger,
             injector,
@@ -377,11 +433,21 @@ impl Registry {
     ///
     /// Worker groups are spawned first as multi-pane tmux sessions; standalone
     /// agents are then spawned each in their own session.
+    ///
+    /// If `session_name` and `sessions_dir` are both `Some`, a master session
+    /// record is written to `<sessions_dir>/<session_name>.json` after all
+    /// agents have started, enabling future resumption via `--resume`.
     pub async fn spawn_all(
         &self,
         startup_prompts: &HashMap<String, String>,
         worker_groups: &[WorkerGroupConfig],
+        session_name: Option<&str>,
+        sessions_dir: Option<&PathBuf>,
     ) {
+        // Record spawn time before Phase 1 so session-ID extraction can filter
+        // to only files written after this moment.
+        let spawn_time = std::time::SystemTime::now();
+
         // Store prompts and groups for later use by restart_agent / health_loop
         {
             let mut prompts = self.startup_prompts.lock().await;
@@ -441,6 +507,69 @@ impl Registry {
                 }
             }
         }
+
+        // --- Phase 4: extract vendor session IDs and save master session file ---
+        if let (Some(name), Some(dir)) = (session_name, sessions_dir) {
+            self.save_orchestrator_session(name, dir, spawn_time).await;
+        }
+    }
+
+    /// Extract vendor session IDs for all agents and write the master session
+    /// file that `--resume <name>` will later read.
+    async fn save_orchestrator_session(
+        &self,
+        session_name: &str,
+        sessions_dir: &Path,
+        spawned_after: std::time::SystemTime,
+    ) {
+        use crate::session::{adapter_for_command, AgentSessionInfo, OrchestratorSession};
+
+        let agents_snapshot = self.agents.lock().await;
+        let mut agent_sessions = HashMap::new();
+
+        for (agent_id, state) in agents_snapshot.iter() {
+            let Some(config) = self.configs.get(agent_id) else {
+                continue;
+            };
+            let sname = state
+                .session_name
+                .clone()
+                .unwrap_or_else(|| config.tmux_session.clone());
+
+            let adapter = adapter_for_command(&config.cli_command);
+            let session_id = adapter.extract_session_id(&sname, spawned_after);
+
+            // Update the per-agent pids file with the resolved session_id
+            self.write_session_file(
+                agent_id,
+                &config.cli_command,
+                &sname,
+                session_id.as_deref(),
+            );
+
+            agent_sessions.insert(
+                agent_id.clone(),
+                AgentSessionInfo {
+                    cli_command: config.cli_command.clone(),
+                    session_name: sname,
+                    session_id,
+                },
+            );
+        }
+        drop(agents_snapshot);
+
+        let orch_session = OrchestratorSession::new(session_name.to_string(), agent_sessions);
+        match orch_session.save(sessions_dir) {
+            Ok(()) => println!(
+                "[supervisor] session '{}' saved → {}",
+                session_name,
+                sessions_dir.join(format!("{session_name}.json")).display()
+            ),
+            Err(e) => eprintln!(
+                "[supervisor] failed to save session '{}': {e}",
+                session_name
+            ),
+        }
     }
 
     fn ensure_worktree_link(&self, config: &AgentConfig) {
@@ -487,6 +616,7 @@ impl Registry {
             Ok(terminal_handle) => {
                 let mut agents = self.agents.lock().await;
                 for member in &group.members {
+                    let session_name = member.tmux_session.clone();
                     let state = AgentState {
                         agent_id: member.agent_id.clone(),
                         tmux_session: member.tmux_session.clone(),
@@ -499,7 +629,15 @@ impl Registry {
                         restart_timestamps: Vec::new(),
                         activity: AgentActivity::Unknown,
                         last_pane_hash: None,
+                        session_name: Some(session_name.clone()),
+                        session_id: None,
                     };
+                    self.write_session_file(
+                        &member.agent_id,
+                        &member.cli_command,
+                        &session_name,
+                        None,
+                    );
                     agents.insert(member.agent_id.clone(), state);
                     self.logger.log(Event::AgentSpawn {
                         agent_id: member.agent_id.clone(),
@@ -536,6 +674,10 @@ impl Registry {
             .spawn_session(&config.tmux_session, &effective_cmd, &config.terminal)
         {
             Ok(terminal_handle) => {
+                // Use the tmux session name as the stable session identifier.
+                // For Claude this matches `--name`; for other agents it's a
+                // human-readable key we can correlate with their session files.
+                let session_name = config.tmux_session.clone();
                 let state = AgentState {
                     agent_id: config.agent_id.clone(),
                     tmux_session: config.tmux_session.clone(),
@@ -548,7 +690,10 @@ impl Registry {
                     restart_timestamps: Vec::new(),
                     activity: AgentActivity::Unknown,
                     last_pane_hash: None,
+                    session_name: Some(session_name.clone()),
+                    session_id: None,
                 };
+                self.write_session_file(&config.agent_id, &config.cli_command, &session_name, None);
                 self.agents
                     .lock()
                     .await
@@ -561,6 +706,30 @@ impl Registry {
             }
             Err(e) => {
                 eprintln!("[supervisor] failed to spawn {}: {e}", config.agent_id);
+            }
+        }
+    }
+
+    /// Write (or overwrite) `runtime/pids/{agent_id}.session.json` with the
+    /// agent's identity and session handle so it can be resumed later.
+    fn write_session_file(
+        &self,
+        agent_id: &str,
+        cli_command: &str,
+        session_name: &str,
+        session_id: Option<&str>,
+    ) {
+        let path = self.pids_dir.join(format!("{agent_id}.session.json"));
+        let payload = serde_json::json!({
+            "agent_id": agent_id,
+            "cli_command": cli_command,
+            "session_name": session_name,
+            "session_id": session_id,
+            "spawned_at": Utc::now().to_rfc3339(),
+        });
+        if let Ok(json) = serde_json::to_string_pretty(&payload) {
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("[supervisor] failed to write session file for {agent_id}: {e}");
             }
         }
     }
@@ -1292,7 +1461,7 @@ impl Registry {
         // command fresh, keeping the tmux session (and terminal) intact.
         // Uses tmux_target (which includes the pane index for grouped agents)
         // so tmux respawns the correct pane, not whichever happens to be active.
-        let effective_cmd = effective_command(config);
+        let effective_cmd = fresh_command(config);
 
         self.injector
             .respawn_pane(&config.tmux_target, &effective_cmd)

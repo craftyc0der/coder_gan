@@ -3,6 +3,7 @@ pub mod injector;
 pub mod logger;
 pub mod menu;
 pub mod scope;
+pub mod session;
 #[cfg(feature = "slack")]
 pub mod slack;
 pub mod spike;

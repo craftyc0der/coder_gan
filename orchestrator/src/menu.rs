@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -448,14 +448,9 @@ async fn handle_modify_workers(
 
             let group_configs =
                 config.worker_group_configs_for_instances(&group_id, &new_instances, new_count);
-            let prompts = match config.startup_prompts_for_group_instances(
-                &group_id,
-                &new_instances,
-                new_count,
-            ) {
-                Ok(p) => p,
-                Err(_) => HashMap::new(),
-            };
+            let prompts = config
+                .startup_prompts_for_group_instances(&group_id, &new_instances, new_count)
+                .unwrap_or_default();
 
             for wg_config in group_configs {
                 for m in &wg_config.members {
@@ -536,6 +531,7 @@ async fn handle_modify_workers(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{highest_instances_to_remove, live_group_instances_from_ids};
 
@@ -681,8 +677,8 @@ async fn handle_status(registry: &Registry) {
 
     println!();
     println!(
-        "  {:<16} {:<28} {:<10} {:<8} {:<8} {}",
-        "AGENT", "SESSION", "STATUS", "ACTIVE", "RESTARTS", "STARTED"
+        "  {:<16} {:<28} {:<10} {:<8} {:<8} STARTED",
+        "AGENT", "SESSION", "STATUS", "ACTIVE", "RESTARTS"
     );
     println!("  {}", "-".repeat(86));
 

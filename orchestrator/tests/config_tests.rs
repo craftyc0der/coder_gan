@@ -2,8 +2,10 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
-use orchestrator::config::{AgentEntry, ConfigError, ProjectConfig, SplitDirection, WorkerGroupEntry};
-use orchestrator::config::{init_project, expand_agent_id};
+use orchestrator::config::{expand_agent_id, init_project};
+use orchestrator::config::{
+    AgentEntry, ConfigError, ProjectConfig, SplitDirection, WorkerGroupEntry,
+};
 
 fn write_agents_toml(dot_dir: &Path, contents: &str) {
     let agents_path = dot_dir.join("agents.toml");
@@ -55,6 +57,9 @@ fn make_config_with_groups(
         log_dir: dot.join("runtime/logs"),
         state_path: dot.join("runtime/logs/state.json"),
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
+        pids_dir: dot.join("runtime/pids"),
+        sessions_dir: dot.join("runtime/sessions"),
+        resume_ids: std::collections::HashMap::new(),
         terminal: Default::default(),
         agents,
         worker_groups,
@@ -106,7 +111,10 @@ fn load_succeeds_with_valid_agents_toml() {
     assert_eq!(config.messages_dir, config.dot_dir.join("messages"));
     assert_eq!(config.log_dir, config.dot_dir.join("runtime/logs"));
     assert_eq!(config.state_path, config.log_dir.join("state.json"));
-    assert_eq!(config.transcript_dir, config.log_dir.join("spike_transcripts"));
+    assert_eq!(
+        config.transcript_dir,
+        config.log_dir.join("spike_transcripts")
+    );
     assert_eq!(config.agents.len(), 1);
     assert_eq!(config.agents[0].id, "coder");
 }
@@ -117,12 +125,12 @@ fn load_returns_not_initialized_when_dot_dir_missing() {
 
     match ProjectConfig::load(tmp.path()) {
         Err(err) => match err {
-        ConfigError::NotInitialized(path) => {
-            let root = tmp.path().canonicalize().unwrap();
-            let dot = root.join(".orchestrator");
-            assert!(path == root || path == dot);
-        }
-        other => panic!("expected NotInitialized, got {other:?}"),
+            ConfigError::NotInitialized(path) => {
+                let root = tmp.path().canonicalize().unwrap();
+                let dot = root.join(".orchestrator");
+                assert!(path == root || path == dot);
+            }
+            other => panic!("expected NotInitialized, got {other:?}"),
         },
         Ok(_) => panic!("expected NotInitialized, got Ok"),
     }
@@ -136,8 +144,8 @@ fn load_returns_toml_parse_on_invalid_toml() {
 
     match ProjectConfig::load(tmp.path()) {
         Err(err) => match err {
-        ConfigError::TomlParse(_) => {}
-        other => panic!("expected TomlParse, got {other:?}"),
+            ConfigError::TomlParse(_) => {}
+            other => panic!("expected TomlParse, got {other:?}"),
         },
         Ok(_) => panic!("expected TomlParse, got Ok"),
     }
@@ -151,8 +159,8 @@ fn load_returns_no_agents_when_empty_array() {
 
     match ProjectConfig::load(tmp.path()) {
         Err(err) => match err {
-        ConfigError::NoAgents => {}
-        other => panic!("expected NoAgents, got {other:?}"),
+            ConfigError::NoAgents => {}
+            other => panic!("expected NoAgents, got {other:?}"),
         },
         Ok(_) => panic!("expected NoAgents, got Ok"),
     }
@@ -177,8 +185,8 @@ fn load_rejects_agent_id_with_space() {
 
     match ProjectConfig::load(tmp.path()) {
         Err(err) => match err {
-        ConfigError::InvalidAgentId(id) => assert_eq!(id, "my agent"),
-        other => panic!("expected InvalidAgentId, got {other:?}"),
+            ConfigError::InvalidAgentId(id) => assert_eq!(id, "my agent"),
+            other => panic!("expected InvalidAgentId, got {other:?}"),
         },
         Ok(_) => panic!("expected InvalidAgentId, got Ok"),
     }
@@ -637,7 +645,10 @@ fn resolved_timers_render_group_and_worktree_variables() {
     let timers = config.resolved_timers().unwrap();
     assert_eq!(timers.len(), 2);
 
-    let coder_1 = timers.iter().find(|timer| timer.agent_id == "coder-1").unwrap();
+    let coder_1 = timers
+        .iter()
+        .find(|timer| timer.agent_id == "coder-1")
+        .unwrap();
     let prompt_1 = coder_1.read_prompt().unwrap();
     assert!(prompt_1.contains("id=coder-1"));
     assert!(prompt_1.contains("suffix=-1"));
@@ -653,7 +664,10 @@ fn resolved_timers_render_group_and_worktree_variables() {
     assert!(prompt_1.contains("root=. msgs=.orchestrator/messages wt=."));
     assert!(prompt_1.contains("appendix coder-1 feature-x/coder-1 ."));
 
-    let coder_2 = timers.iter().find(|timer| timer.agent_id == "coder-2").unwrap();
+    let coder_2 = timers
+        .iter()
+        .find(|timer| timer.agent_id == "coder-2")
+        .unwrap();
     let prompt_2 = coder_2.read_prompt().unwrap();
     assert!(prompt_2.contains("id=coder-2"));
     assert!(prompt_2.contains("suffix=-2"));
@@ -736,11 +750,7 @@ fn make_worker_group(count: u32) -> WorkerGroupEntry {
 #[test]
 fn agent_configs_with_group_count_one_preserves_original_ids() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(1)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(1)]);
 
     let cfgs = config.agent_configs();
     // reviewer is standalone, coder+tester are grouped
@@ -764,11 +774,7 @@ fn agent_configs_with_group_count_one_preserves_original_ids() {
 #[test]
 fn agent_configs_with_group_count_two_expands_ids() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(2)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(2)]);
 
     let cfgs = config.agent_configs();
     // 1 standalone (reviewer) + 2 instances × 2 members = 5
@@ -790,16 +796,18 @@ fn agent_configs_with_group_count_two_expands_ids() {
 #[test]
 fn group_session_for_sanitizes_feature_names_for_tmux() {
     let tmp = TempDir::new().unwrap();
-    let mut config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(2)],
-    );
+    let mut config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(2)]);
 
     config.worktree_feature = Some("JOM/PR-1065".into());
 
-    assert_eq!(config.group_session_for("worker", 1, 2), "testproject-JOM-PR-1065-worker-1");
-    assert_eq!(config.group_session_for("worker", 2, 2), "testproject-JOM-PR-1065-worker-2");
+    assert_eq!(
+        config.group_session_for("worker", 1, 2),
+        "testproject-JOM-PR-1065-worker-1"
+    );
+    assert_eq!(
+        config.group_session_for("worker", 2, 2),
+        "testproject-JOM-PR-1065-worker-2"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -809,11 +817,7 @@ fn group_session_for_sanitizes_feature_names_for_tmux() {
 #[test]
 fn worker_group_configs_single_instance() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(1)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(1)]);
 
     let groups = config.worker_group_configs();
     assert_eq!(groups.len(), 1);
@@ -828,11 +832,7 @@ fn worker_group_configs_single_instance() {
 #[test]
 fn worker_group_configs_multiple_instances() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(3)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(3)]);
 
     let groups = config.worker_group_configs();
     assert_eq!(groups.len(), 3);
@@ -863,11 +863,7 @@ fn worker_group_configs_vertical_layout_propagated() {
 #[test]
 fn worker_group_configs_for_instances_use_worktree_paths() {
     let tmp = TempDir::new().unwrap();
-    let mut config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(3)],
-    );
+    let mut config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(3)]);
 
     let worktree_root = tmp.path().join("worker-3-worktree");
     config.worktree_feature = Some("feature-x".into());
@@ -908,11 +904,7 @@ fn worker_group_configs_for_instances_use_worktree_paths() {
 #[test]
 fn worktree_specs_for_group_instances_expand_group_and_agent_ids() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(3)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(3)]);
 
     let specs = config.worktree_specs_for_group_instances("worker", &[3], 3);
     assert_eq!(specs.len(), 1);
@@ -929,15 +921,19 @@ fn worktree_specs_for_group_instances_expand_group_and_agent_ids() {
 fn startup_prompts_grouped_agents_render_peer_inboxes() {
     let tmp = TempDir::new().unwrap();
     let dot_dir = make_dot_dir(tmp.path());
-    write_prompt(&dot_dir, "coder.md", "id={{agent_id}} peers={{peer_inboxes}}");
-    write_prompt(&dot_dir, "tester.md", "id={{agent_id}} peers={{peer_inboxes}}");
+    write_prompt(
+        &dot_dir,
+        "coder.md",
+        "id={{agent_id}} peers={{peer_inboxes}}",
+    );
+    write_prompt(
+        &dot_dir,
+        "tester.md",
+        "id={{agent_id}} peers={{peer_inboxes}}",
+    );
     write_prompt(&dot_dir, "reviewer.md", "id={{agent_id}}");
 
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(1)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(1)]);
 
     let prompts = config.startup_prompts().unwrap();
 
@@ -956,15 +952,15 @@ fn startup_prompts_grouped_agents_render_peer_inboxes() {
 fn startup_prompts_grouped_agents_with_count_two_expand_ids() {
     let tmp = TempDir::new().unwrap();
     let dot_dir = make_dot_dir(tmp.path());
-    write_prompt(&dot_dir, "coder.md", "id={{agent_id}} suffix={{instance_suffix}}");
+    write_prompt(
+        &dot_dir,
+        "coder.md",
+        "id={{agent_id}} suffix={{instance_suffix}}",
+    );
     write_prompt(&dot_dir, "tester.md", "id={{agent_id}}");
     write_prompt(&dot_dir, "reviewer.md", "id={{agent_id}}");
 
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(2)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(2)]);
 
     let prompts = config.startup_prompts().unwrap();
 
@@ -989,17 +985,9 @@ fn startup_prompts_worker_inboxes_variable_rendered_for_standalone() {
     let dot_dir = make_dot_dir(tmp.path());
     write_prompt(&dot_dir, "coder.md", "id={{agent_id}}");
     write_prompt(&dot_dir, "tester.md", "id={{agent_id}}");
-    write_prompt(
-        &dot_dir,
-        "reviewer.md",
-        "workers={{worker_inboxes}}",
-    );
+    write_prompt(&dot_dir, "reviewer.md", "workers={{worker_inboxes}}");
 
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(1)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(1)]);
 
     let prompts = config.startup_prompts().unwrap();
     let reviewer_prompt = prompts.get("reviewer").unwrap();
@@ -1014,11 +1002,7 @@ fn startup_prompts_worker_inboxes_variable_rendered_for_standalone() {
 #[test]
 fn ensure_dirs_creates_expanded_group_inboxes() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(2)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(2)]);
 
     config.ensure_dirs().unwrap();
 
@@ -1037,11 +1021,7 @@ fn ensure_dirs_creates_expanded_group_inboxes() {
 #[test]
 fn ensure_dirs_with_count_one_uses_original_ids() {
     let tmp = TempDir::new().unwrap();
-    let config = make_config_with_groups(
-        &tmp,
-        make_group_agents(),
-        vec![make_worker_group(1)],
-    );
+    let config = make_config_with_groups(&tmp, make_group_agents(), vec![make_worker_group(1)]);
 
     config.ensure_dirs().unwrap();
 
@@ -1222,13 +1202,22 @@ fn load_accepts_valid_worker_group() {
 fn group_session_for_no_suffix_when_total_one() {
     let tmp = TempDir::new().unwrap();
     let config = make_config(&tmp, make_agents());
-    assert_eq!(config.group_session_for("worker", 1, 1), "testproject-worker");
+    assert_eq!(
+        config.group_session_for("worker", 1, 1),
+        "testproject-worker"
+    );
 }
 
 #[test]
 fn group_session_for_appends_instance_when_total_greater_than_one() {
     let tmp = TempDir::new().unwrap();
     let config = make_config(&tmp, make_agents());
-    assert_eq!(config.group_session_for("worker", 1, 2), "testproject-worker-1");
-    assert_eq!(config.group_session_for("worker", 2, 2), "testproject-worker-2");
+    assert_eq!(
+        config.group_session_for("worker", 1, 2),
+        "testproject-worker-1"
+    );
+    assert_eq!(
+        config.group_session_for("worker", 2, 2),
+        "testproject-worker-2"
+    );
 }
