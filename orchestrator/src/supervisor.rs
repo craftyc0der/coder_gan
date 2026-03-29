@@ -12,12 +12,23 @@ use crate::config::{ResolvedTimer, SplitDirection};
 use crate::injector::{InterruptKeys, InjectorOps, RealInjector};
 use crate::logger::{Event, Logger};
 
-fn effective_command(config: &AgentConfig) -> String {
+fn command_with_session_mode(config: &AgentConfig, allow_resume: bool) -> String {
     let adapter = crate::session::adapter_for_command(&config.cli_command);
 
-    let base_cmd = if let Some(ref session_id) = config.resume_session_id {
+    let base_cmd = if allow_resume {
+        if let Some(ref session_id) = config.resume_session_id {
         // Resuming: let the adapter build the resume command.
-        adapter.resume_command(&config.cli_command, session_id)
+            adapter.resume_command(&config.cli_command, session_id)
+        } else {
+            // Fresh spawn: append any adapter-supplied flags (e.g. `--name` for Claude).
+            let tmux_session = &config.tmux_session;
+            let extra = adapter.spawn_extra_args(tmux_session);
+            if extra.is_empty() {
+                config.cli_command.clone()
+            } else {
+                format!("{} {}", config.cli_command, extra.join(" "))
+            }
+        }
     } else {
         // Fresh spawn: append any adapter-supplied flags (e.g. `--name` for Claude).
         let tmux_session = &config.tmux_session;
@@ -33,6 +44,14 @@ fn effective_command(config: &AgentConfig) -> String {
         Some(dir) => format!("cd {} && {}", shell_escape(dir), base_cmd),
         None => base_cmd,
     }
+}
+
+fn effective_command(config: &AgentConfig) -> String {
+    command_with_session_mode(config, true)
+}
+
+fn fresh_command(config: &AgentConfig) -> String {
+    command_with_session_mode(config, false)
 }
 
 fn shared_dot_orchestrator_dir(config: &AgentConfig) -> Option<PathBuf> {
@@ -130,12 +149,10 @@ pub fn detect_attention_pattern(content: &str, cli_command: &str) -> Option<&'st
         .collect::<Vec<_>>()
         .join("\n");
 
-    for pattern in attention_patterns(cli_command) {
-        if tail.contains(pattern) {
-            return Some(pattern);
-        }
-    }
-    None
+    attention_patterns(cli_command)
+        .iter()
+        .find(|pattern| tail.contains(**pattern))
+        .copied()
 }
 
 /// Print a high-visibility attention banner to the orchestrator terminal.
@@ -502,7 +519,7 @@ impl Registry {
     async fn save_orchestrator_session(
         &self,
         session_name: &str,
-        sessions_dir: &PathBuf,
+        sessions_dir: &Path,
         spawned_after: std::time::SystemTime,
     ) {
         use crate::session::{adapter_for_command, AgentSessionInfo, OrchestratorSession};
@@ -1444,7 +1461,7 @@ impl Registry {
         // command fresh, keeping the tmux session (and terminal) intact.
         // Uses tmux_target (which includes the pane index for grouped agents)
         // so tmux respawns the correct pane, not whichever happens to be active.
-        let effective_cmd = effective_command(config);
+        let effective_cmd = fresh_command(config);
 
         self.injector
             .respawn_pane(&config.tmux_target, &effective_cmd)

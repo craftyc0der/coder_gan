@@ -421,6 +421,7 @@ impl ProjectConfig {
         (worker_inboxes_all.join("\n"), worker_instance_vars)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prompt_template_context(
         &self,
         agent_id: &str,
@@ -1413,23 +1414,25 @@ pub fn check_agent_command_warnings(agents: &[AgentEntry]) -> Vec<String> {
     let mut warnings = Vec::new();
     for agent in agents {
         let cmd = agent.command.as_str();
-        if cmd == "gemini" || cmd.starts_with("gemini ") {
-            if !cmd.contains("--yolo") && !cmd.contains("--approval-mode") {
-                warnings.push(format!(
-                    "Warning: Agent '{}' uses gemini without --yolo. \
-                     It may block on action confirmations.",
-                    agent.id
-                ));
-            }
+        if (cmd == "gemini" || cmd.starts_with("gemini "))
+            && !cmd.contains("--yolo")
+            && !cmd.contains("--approval-mode")
+        {
+            warnings.push(format!(
+                "Warning: Agent '{}' uses gemini without --yolo. \
+                 It may block on action confirmations.",
+                agent.id
+            ));
         }
-        if cmd == "cursor" || cmd.starts_with("cursor ") {
-            if cmd != "cursor agent" && !cmd.starts_with("cursor agent ") {
-                warnings.push(format!(
-                    "Warning: Agent '{}' uses cursor without 'agent' subcommand. \
-                     Use 'cursor agent' for CLI mode; plain 'cursor' opens the GUI.",
-                    agent.id
-                ));
-            }
+        if (cmd == "cursor" || cmd.starts_with("cursor "))
+            && cmd != "cursor agent"
+            && !cmd.starts_with("cursor agent ")
+        {
+            warnings.push(format!(
+                "Warning: Agent '{}' uses cursor without 'agent' subcommand. \
+                 Use 'cursor agent' for CLI mode; plain 'cursor' opens the GUI.",
+                agent.id
+            ));
         }
     }
     warnings

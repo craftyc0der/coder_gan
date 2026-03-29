@@ -214,7 +214,7 @@ fn newest_file_id_in_tree(
             return;
         }
         let Some(id) = extract_id(path) else { return };
-        let update = best.as_ref().map_or(true, |(t, _)| mtime > *t);
+        let update = best.as_ref().is_none_or(|(t, _)| mtime > *t);
         if update {
             best = Some((mtime, id));
         }
@@ -241,7 +241,7 @@ fn newest_dir_id_in(base: &Path, spawned_after: SystemTime) -> Option<String> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let update = best.as_ref().map_or(true, |(t, _)| mtime > *t);
+        let update = best.as_ref().is_none_or(|(t, _)| mtime > *t);
         if update {
             best = Some((mtime, name));
         }
@@ -334,8 +334,7 @@ impl OrchestratorSession {
     pub fn save(&self, sessions_dir: &Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(sessions_dir)?;
         let path = sessions_dir.join(format!("{}.json", self.name));
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
@@ -343,7 +342,6 @@ impl OrchestratorSession {
     pub fn load(sessions_dir: &Path, name: &str) -> Result<Self, std::io::Error> {
         let path = sessions_dir.join(format!("{}.json", name));
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::from_str(&content).map_err(std::io::Error::other)
     }
 }

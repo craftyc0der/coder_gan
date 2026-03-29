@@ -1,14 +1,14 @@
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::path::PathBuf;
 
 use tempfile::TempDir;
 
 use orchestrator::config::{AgentEntry, ProjectConfig};
 use orchestrator::injector::{InjectionError, InjectorOps, InterruptKeys};
-use orchestrator::spike::{run_spike_with_deps, run_spike_interrupt_with_deps, SpikeTimings};
+use orchestrator::spike::{run_spike_interrupt_with_deps, run_spike_with_deps, SpikeTimings};
 
 #[derive(Default)]
 struct MockInjector {
@@ -49,7 +49,12 @@ impl InjectorOps for MockInjector {
         self.killed.lock().unwrap().push(session.to_string());
     }
 
-    fn spawn_session(&self, session: &str, cmd: &str, _terminal: &orchestrator::config::TerminalPreference) -> Result<Option<u32>, InjectionError> {
+    fn spawn_session(
+        &self,
+        session: &str,
+        cmd: &str,
+        _terminal: &orchestrator::config::TerminalPreference,
+    ) -> Result<Option<u32>, InjectionError> {
         self.spawned
             .lock()
             .unwrap()
@@ -166,6 +171,7 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
     std::fs::create_dir_all(dot.join("messages/processed")).unwrap();
     std::fs::create_dir_all(dot.join("runtime/logs/spike_transcripts")).unwrap();
     std::fs::create_dir_all(dot.join("runtime/pids")).unwrap();
+    std::fs::create_dir_all(dot.join("runtime/sessions")).unwrap();
     std::fs::create_dir_all(dot.join("messages/to_coder")).unwrap();
 
     ProjectConfig {
@@ -176,6 +182,9 @@ fn make_config(tmp: &TempDir, agents: Vec<AgentEntry>) -> ProjectConfig {
         log_dir: dot.join("runtime/logs"),
         state_path: dot.join("runtime/logs/state.json"),
         transcript_dir: dot.join("runtime/logs/spike_transcripts"),
+        pids_dir: dot.join("runtime/pids"),
+        sessions_dir: dot.join("runtime/sessions"),
+        resume_ids: std::collections::HashMap::new(),
         terminal: Default::default(),
         agents,
         worker_groups: vec![],
@@ -251,13 +260,8 @@ async fn agent_selection_named_agent() {
         ..Default::default()
     };
 
-    let result = run_spike_with_deps(
-        config,
-        Some("tester"),
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_with_deps(config, Some("tester"), &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_ok());
 
     let spawned = inj.spawned.lock().unwrap();
@@ -271,13 +275,8 @@ async fn agent_selection_unknown_agent_returns_err() {
     let config = make_config(&tmp, make_agents());
     let inj = MockInjector::default();
 
-    let result = run_spike_with_deps(
-        config,
-        Some("bogus"),
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_with_deps(config, Some("bogus"), &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_err());
     assert!(inj.spawned.lock().unwrap().is_empty());
 }
@@ -316,7 +315,7 @@ async fn validation_timeout_returns_err_and_logs_event() {
 
     let result = run_spike_with_deps(config, None, &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_err());
-    assert!(inj.killed.lock().unwrap().len() >= 1);
+    assert!(!inj.killed.lock().unwrap().is_empty());
 
     let events_path = log_dir.join("spike_events.jsonl");
     let events = std::fs::read_to_string(events_path).unwrap_or_default();
@@ -428,35 +427,36 @@ async fn interrupt_spike_sends_correct_keys_for_claude() {
         terminal: None,
     }];
     let config = make_config(&tmp, agents);
-    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+    let interrupt_file = config
+        .messages_dir
+        .join("processed/spike-interrupt-test.md");
 
     // capture_sequence: first call is pre-interrupt baseline, then 3 stable calls
     // for prompt recovery (need stable_count >= 2), then captures for post-inject polling
     let inj = MockInjector {
         capture_sequence: Mutex::new(vec![
             "agent busy generating...".into(), // pre-interrupt baseline
-            "$ ".into(),                        // poll 1: sets last_hash
-            "$ ".into(),                        // poll 2: stable_count = 1
-            "$ ".into(),                        // poll 3: stable_count = 2 → recovered
-            "$ ".into(),                        // post-interrupt transcript
-            "$ done".into(),                    // post-interrupt poll captures
+            "$ ".into(),                       // poll 1: sets last_hash
+            "$ ".into(),                       // poll 2: stable_count = 1
+            "$ ".into(),                       // poll 3: stable_count = 2 → recovered
+            "$ ".into(),                       // post-interrupt transcript
+            "$ done".into(),                   // post-interrupt poll captures
         ]),
         interrupt_validation_file: Some(interrupt_file),
         ..Default::default()
     };
 
-    let result = run_spike_interrupt_with_deps(
-        config,
-        None,
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_interrupt_with_deps(config, None, &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_ok(), "spike interrupt failed: {:?}", result);
 
     // Verify cancel and clear keys were sent
     let sent = inj.sent_keys.lock().unwrap();
-    assert!(sent.len() >= 2, "expected at least 2 send_keys calls, got {}", sent.len());
+    assert!(
+        sent.len() >= 2,
+        "expected at least 2 send_keys calls, got {}",
+        sent.len()
+    );
     assert_eq!(sent[0].1, "C-c", "cancel key should be C-c for claude");
     assert_eq!(sent[1].1, "C-u", "clear key should be C-u for claude");
 }
@@ -477,7 +477,9 @@ async fn interrupt_spike_sends_escape_for_copilot() {
         terminal: None,
     }];
     let config = make_config(&tmp, agents);
-    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+    let interrupt_file = config
+        .messages_dir
+        .join("processed/spike-interrupt-test.md");
 
     let inj = MockInjector {
         capture_sequence: Mutex::new(vec![
@@ -492,19 +494,20 @@ async fn interrupt_spike_sends_escape_for_copilot() {
         ..Default::default()
     };
 
-    let result = run_spike_interrupt_with_deps(
-        config,
-        None,
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_interrupt_with_deps(config, None, &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_ok());
 
     let sent = inj.sent_keys.lock().unwrap();
     assert!(sent.len() >= 2);
-    assert_eq!(sent[0].1, "Escape", "cancel key should be Escape for copilot");
-    assert_eq!(sent[1].1, "Escape", "clear key should be Escape for copilot");
+    assert_eq!(
+        sent[0].1, "Escape",
+        "cancel key should be Escape for copilot"
+    );
+    assert_eq!(
+        sent[1].1, "Escape",
+        "clear key should be Escape for copilot"
+    );
 }
 
 #[tokio::test]
@@ -526,13 +529,8 @@ async fn interrupt_spike_fails_when_pane_never_stabilizes() {
         ..Default::default()
     };
 
-    let result = run_spike_interrupt_with_deps(
-        config,
-        None,
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_interrupt_with_deps(config, None, &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -557,7 +555,9 @@ async fn interrupt_spike_post_inject_succeeds() {
         terminal: None,
     }];
     let config = make_config(&tmp, agents);
-    let interrupt_file = config.messages_dir.join("processed/spike-interrupt-test.md");
+    let interrupt_file = config
+        .messages_dir
+        .join("processed/spike-interrupt-test.md");
 
     let inj = MockInjector {
         capture_sequence: Mutex::new(vec![
@@ -572,17 +572,15 @@ async fn interrupt_spike_post_inject_succeeds() {
         ..Default::default()
     };
 
-    let result = run_spike_interrupt_with_deps(
-        config,
-        None,
-        &inj,
-        &SpikeTimings::for_testing(),
-    )
-    .await;
+    let result =
+        run_spike_interrupt_with_deps(config, None, &inj, &SpikeTimings::for_testing()).await;
     assert!(result.is_ok());
 
     // Verify the interrupt validation file was created
-    assert!(interrupt_file.exists(), "interrupt validation file should exist");
+    assert!(
+        interrupt_file.exists(),
+        "interrupt validation file should exist"
+    );
     let content = std::fs::read_to_string(&interrupt_file).unwrap();
     assert!(content.contains("spike interrupt test passed"));
 

@@ -61,7 +61,7 @@ fn log_agent_spawn_writes_event_and_agent_id() {
     let v = parse_line(&lines[0]);
     assert_eq!(v["event"], "agent_spawn");
     assert_eq!(v["agent_id"], "coder");
-    assert!(v["timestamp"].as_str().unwrap_or_default().len() > 0);
+    assert!(!v["timestamp"].as_str().unwrap_or_default().is_empty());
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn log_orchestrator_start_has_only_timestamp_and_event() {
     let lines = read_lines(logger.path());
     let v = parse_line(&lines[0]);
     assert_eq!(v["event"], "orchestrator_start");
-    assert!(v["timestamp"].as_str().unwrap_or_default().len() > 0);
+    assert!(!v["timestamp"].as_str().unwrap_or_default().is_empty());
     let obj = v.as_object().unwrap();
     assert_eq!(obj.len(), 2);
 }

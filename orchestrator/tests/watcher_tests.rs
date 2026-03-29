@@ -116,6 +116,7 @@ async fn make_registry(tmp: &TempDir, injector: Arc<dyn InjectorOps>) -> Registr
     let messages = root.join(".orchestrator/messages");
     let log_dir = root.join(".orchestrator/runtime/logs");
     let state_path = log_dir.join("state.json");
+    let pids_dir = root.join(".orchestrator/runtime/pids");
     let logger = Arc::new(Logger::new(&log_dir, "events.jsonl"));
 
     let configs = vec![AgentConfig {
@@ -127,10 +128,12 @@ async fn make_registry(tmp: &TempDir, injector: Arc<dyn InjectorOps>) -> Registr
         allowed_write_dirs: vec![root.join("src/")],
         working_dir: None,
         terminal: Default::default(),
+        resume_session_id: None,
     }];
 
-    let registry = Registry::new_with_injector(configs, state_path, log_dir, logger, injector);
-    registry.spawn_all(&HashMap::new(), &[]).await;
+    let registry =
+        Registry::new_with_injector(configs, state_path, pids_dir, log_dir, logger, injector);
+    registry.spawn_all(&HashMap::new(), &[], None, None).await;
     registry
 }
 
@@ -239,7 +242,7 @@ fn maybe_repair_worktree_dot_orchestrator_repairs_replaced_directory() {
     let repaired = maybe_repair_worktree_dot_orchestrator(
         &broken_dot,
         &shared_dot,
-        &[worktree_root.clone()],
+        std::slice::from_ref(&worktree_root),
     );
 
     assert!(repaired);
@@ -265,7 +268,7 @@ fn maybe_repair_worktree_dot_orchestrator_ignores_missing_path() {
     let repaired = maybe_repair_worktree_dot_orchestrator(
         &missing_dot,
         &shared_dot,
-        &[worktree_root.clone()],
+        std::slice::from_ref(&worktree_root),
     );
 
     assert!(!repaired);
